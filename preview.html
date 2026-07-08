@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Dinosaur WebAR Developer Control Panel</title>
+  <style>
+    :root {
+      --bg-dark: #0f172a;
+      --panel-bg: rgba(30, 41, 59, 0.7);
+      --border-color: rgba(255, 255, 255, 0.08);
+      --accent-green: #10b981;
+      --accent-blue: #3b82f6;
+      --accent-red: #ef4444;
+      --text-white: #ffffff;
+      --text-gray: #94a3b8;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      background-color: var(--bg-dark);
+      color: var(--text-white);
+      font-family: 'Outfit', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow-x: hidden;
+    }
+
+    /* Premium Header */
+    header {
+      background-color: rgba(15, 23, 42, 0.9);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--border-color);
+      padding: 16px 32px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+
+    header h1 {
+      margin: 0;
+      font-size: 1.5rem;
+      font-weight: 700;
+      letter-spacing: 0.5px;
+      color: #ffffff;
+    }
+
+    /* Layout Wrapper */
+    .dashboard-container {
+      display: flex;
+      flex: 1;
+      padding: 24px;
+      gap: 24px;
+      max-width: 100%;
+      margin: 0 auto;
+      width: 100%;
+      box-sizing: border-box;
+    }
+
+    /* Main Area: Draggable Canvas */
+    .card-workspace {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    /* Draggable SandBox Area */
+    .drag-area {
+      background-color: #0b0f19;
+      border: 2px dashed rgba(255, 255, 255, 0.15);
+      border-radius: 16px;
+      height: calc(100vh - 180px);
+      min-height: 550px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: inset 0 4px 20px rgba(0,0,0,0.6);
+    }
+
+    /* Grid overlay for tech look */
+    .drag-area::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background-image: 
+        linear-gradient(rgba(255, 255, 255, 0.02) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(255, 255, 255, 0.02) 1px, transparent 1px);
+      background-size: 20px 20px;
+      pointer-events: none;
+    }
+
+    /* Draggable Target Cards */
+    .drag-card {
+      position: absolute;
+      width: 200px;
+      background-color: rgba(15, 23, 42, 0.85);
+      border: 2px solid transparent;
+      border-radius: 16px;
+      padding: 12px;
+      box-sizing: border-box;
+      cursor: grab;
+      user-select: none;
+      box-shadow: 0 10px 25px rgba(0,0,0,0.5);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      transition: box-shadow 0.15s, border-color 0.15s;
+    }
+
+    .drag-card:active {
+      cursor: grabbing;
+      box-shadow: 0 15px 35px rgba(0,0,0,0.7);
+    }
+
+    .drag-card img {
+      width: 100%;
+      height: auto;
+      border-radius: 10px;
+      pointer-events: none;
+    }
+
+    .drag-card .card-name {
+      margin-top: 10px;
+      font-size: 0.9rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+    }
+
+    /* Neon Borders for targets */
+    .drag-card.dino-card { 
+      border-color: rgba(16, 185, 129, 0.4); 
+    }
+    .drag-card.dino-card:hover { border-color: var(--accent-green); }
+    .drag-card.dino-card .card-name { color: var(--accent-green); }
+
+    .drag-card.tree-card { 
+      border-color: rgba(59, 130, 246, 0.4); 
+    }
+    .drag-card.tree-card:hover { border-color: var(--accent-blue); }
+    .drag-card.tree-card .card-name { color: var(--accent-blue); }
+
+    .drag-card.meat-card { 
+      border-color: rgba(239, 68, 68, 0.4); 
+    }
+    .drag-card.meat-card:hover { border-color: var(--accent-red); }
+    .drag-card.meat-card .card-name { color: var(--accent-red); }
+
+  </style>
+</head>
+<body>
+
+  <header>
+    <h1>Dinosaur WebAR Sandbox Panel</h1>
+  </header>
+
+  <div class="dashboard-container">
+    
+    <!-- MAIN RIGHT: Draggable Sandbox -->
+    <div class="card-workspace">
+
+      <div class="drag-area" id="drag-area">
+        
+        <!-- Dinosaur Card (Index 0) -->
+        <div class="drag-card dino-card" id="card-dino">
+          <img src="assets/dino_card.png" alt="Dino Card">
+          <span class="card-name">Dinosaur Card</span>
+        </div>
+
+        <!-- Tree Card (Index 1) -->
+        <div class="drag-card tree-card" id="card-tree">
+          <img src="assets/tree_card.png" alt="Tree Card">
+          <span class="card-name">Tree Card</span>
+        </div>
+
+        <!-- Meat Card (Index 2) -->
+        <div class="drag-card meat-card" id="card-meat">
+          <img src="assets/meat_card.png" alt="Meat Card">
+          <span class="card-name">Meat Card</span>
+        </div>
+
+      </div>
+    </div>
+
+  </div>
+
+  <script>
+    // Set active server IP dynamically from URL if needed
+    const currentHost = window.location.hostname;
+    const serverUrlSpan = document.getElementById('server-url');
+    if (serverUrlSpan && currentHost !== 'localhost' && currentHost !== '127.0.0.1') {
+      serverUrlSpan.textContent = `https://${currentHost}:3030`;
+    }
+
+    // Draggable Functionality
+    const dragArea = document.getElementById('drag-area');
+    const dragCards = document.querySelectorAll('.drag-card');
+
+    dragCards.forEach(card => {
+      let isDragging = false;
+      let offsetX, offsetY;
+
+      card.addEventListener('mousedown', e => {
+        isDragging = true;
+        offsetX = e.clientX - card.getBoundingClientRect().left;
+        offsetY = e.clientY - card.getBoundingClientRect().top;
+        card.style.zIndex = 1000;
+        
+        // Elevate visual depth on drag
+        card.style.boxShadow = '0 20px 45px rgba(0, 0, 0, 0.8)';
+      });
+
+      document.addEventListener('mousemove', e => {
+        if (!isDragging) return;
+
+        // Position calculations relative to the drag area container
+        const rect = dragArea.getBoundingClientRect();
+        let x = e.clientX - rect.left - offsetX;
+        let y = e.clientY - rect.top - offsetY;
+
+        // Keep inside bounds
+        x = Math.max(0, Math.min(x, rect.width - card.offsetWidth));
+        y = Math.max(0, Math.min(y, rect.height - card.offsetHeight));
+
+        card.style.left = `${x}px`;
+        card.style.top = `${y}px`;
+      });
+
+      document.addEventListener('mouseup', () => {
+        if (isDragging) {
+          isDragging = false;
+          card.style.zIndex = '';
+          card.style.boxShadow = '';
+        }
+      });
+
+      // Mobile touch support
+      card.addEventListener('touchstart', e => {
+        isDragging = true;
+        const touch = e.touches[0];
+        offsetX = touch.clientX - card.getBoundingClientRect().left;
+        offsetY = touch.clientY - card.getBoundingClientRect().top;
+        card.style.zIndex = 1000;
+      });
+
+      document.addEventListener('touchmove', e => {
+        if (!isDragging) return;
+        const touch = e.touches[0];
+        const rect = dragArea.getBoundingClientRect();
+        let x = touch.clientX - rect.left - offsetX;
+        let y = touch.clientY - rect.top - offsetY;
+
+        x = Math.max(0, Math.min(x, rect.width - card.offsetWidth));
+        y = Math.max(0, Math.min(y, rect.height - card.offsetHeight));
+
+        card.style.left = `${x}px`;
+        card.style.top = `${y}px`;
+      });
+
+      document.addEventListener('touchend', () => {
+        if (isDragging) {
+          isDragging = false;
+          card.style.zIndex = '';
+        }
+      });
+    });
+
+    // Center layout calculations
+    function layoutCardsCenter() {
+      const dino = document.getElementById('card-dino');
+      const tree = document.getElementById('card-tree');
+      const meat = document.getElementById('card-meat');
+      if (!dino || !tree || !meat) return;
+
+      const rect = dragArea.getBoundingClientRect();
+      const cardWidth = 200;
+      const cardHeight = 250;
+      const gap = 32;
+      
+      const totalWidth = 3 * cardWidth + 2 * gap;
+      const startX = Math.max(20, (rect.width - totalWidth) / 2);
+      const startY = Math.max(20, (rect.height - cardHeight) / 2);
+
+      dino.style.left = `${startX}px`;
+      dino.style.top = `${startY}px`;
+
+      tree.style.left = `${startX + cardWidth + gap}px`;
+      tree.style.top = `${startY}px`;
+
+      meat.style.left = `${startX + 2 * (cardWidth + gap)}px`;
+      meat.style.top = `${startY}px`;
+    }
+
+    // Reset card layouts to defaults
+    function resetCards() {
+      layoutCardsCenter();
+    }
+
+    // Initialize layout on load and on resize
+    window.addEventListener('load', layoutCardsCenter);
+    window.addEventListener('resize', layoutCardsCenter);
+    
+    // Fallback invocation in case window load fired already
+    setTimeout(layoutCardsCenter, 100);
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+{
+  "name": "webar-3d-demo-student",
+  "version": "1.0.0",
+  "description": "A self-hosted WebAR 3D model tracking demo using MindAR and A-Frame",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "webar",
+    "mindar",
+    "a-frame",
+    "augmented-reality",
+    "3d-models",
+    "self-hosted"
+  ],
+  "author": "Antigravity",
+  "license": "MIT",
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "qrcode-terminal": "^0.12.0"
+  }
+}
