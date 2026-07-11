@@ -81,9 +81,6 @@
           this.meatTarget.addEventListener('targetFound', () => {
             this.meatVisible = true;
             this.updateHUD();
-            if (window.dinoAudio) {
-              window.dinoAudio.playRoar();
-            }
           });
           this.meatTarget.addEventListener('targetLost', () => {
             this.meatVisible = false;

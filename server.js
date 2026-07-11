@@ -162,10 +162,14 @@ function handleRequest(req, res) {
     res.writeHead(206, head);
     file.pipe(res);
   } else {
+    const isCacheableAsset = /\.(glb|gltf|mind|png|jpg|jpeg|webp)$/i.test(filePath);
     const head = {
       'Content-Length': fileSize,
       'Content-Type': contentType,
     };
+    if (isCacheableAsset) {
+      head['Cache-Control'] = 'public, max-age=86400'; // Cache for 24 hours
+    }
     res.writeHead(200, head);
     fs.createReadStream(filePath).pipe(res);
   }
