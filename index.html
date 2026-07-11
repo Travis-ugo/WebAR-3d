@@ -9,7 +9,6 @@
   <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/donmccurdy/aframe-extras@v7.2.0/dist/aframe-extras.min.js"></script>
-  
   <script>
     // =========================================================================
     // 1. MINDAR CAMERA SAFETY PATCH
@@ -17,8 +16,8 @@
     // If targets.mind only has 1 target (index 0) during testing, A-Frame will normally 
     // crash when trying to initialize entities for target 1 (Tree) and 2 (Meat).
     // This patch intercepts setupAnchor and safely skips missing targets instead of crashing.
-    if (AFRAME.systems['mindar-image-system']) {
-      const systemProto = AFRAME.systems['mindar-image-system'].prototype;
+    if (AFRAME.registeredSystems['mindar-image-system']) {
+      const systemProto = AFRAME.registeredSystems['mindar-image-system'].prototype;
       const originalSetupAnchor = systemProto.setupAnchor;
       systemProto.setupAnchor = function (targetIndex, el) {
         if (!this.anchors || targetIndex >= this.anchors.length) {
@@ -41,6 +40,8 @@
         this.dinoWrapper = document.querySelector("#dino-model-wrapper");
         this.meatTarget = document.querySelector("#meat-target");
         this.treeTarget = document.querySelector("#tree-target");
+        this.treeGltf = document.querySelector("#tree-target a-gltf-model");
+        this.ambientLight = document.querySelector("#ambient-light");
         
         // Tracking states
         this.dinoVisible = false;
@@ -49,6 +50,7 @@
         
         this.isEating = false;
         this.isWalking = false;
+        this.isScratching = false;
         
         // Default home state positions
         this.homePos = new THREE.Vector3(0, 0, 0);
@@ -65,6 +67,9 @@
         this.el.addEventListener('targetFound', () => {
           this.dinoVisible = true;
           this.updateHUD();
+          if (window.dinoAudio) {
+            window.dinoAudio.playRoar();
+          }
         });
         this.el.addEventListener('targetLost', () => {
           this.dinoVisible = false;
@@ -76,6 +81,9 @@
           this.meatTarget.addEventListener('targetFound', () => {
             this.meatVisible = true;
             this.updateHUD();
+            if (window.dinoAudio) {
+              window.dinoAudio.playRoar();
+            }
           });
           this.meatTarget.addEventListener('targetLost', () => {
             this.meatVisible = false;
@@ -91,6 +99,7 @@
           });
           this.treeTarget.addEventListener('targetLost', () => {
             this.treeVisible = false;
+            this.resetDino();
             this.updateHUD();
           });
         }
@@ -137,16 +146,16 @@
         if (this.dinoVisible) {
           statusText = "Dinosaur Detected! 🦖";
           toastText = "Dinosaur is looking around.";
-          statusColor = "#10b981"; // Emerald Green
+          statusColor = "#b45309"; // Amber/Brown
           
           if (isMeatActive) {
             statusText = "Meat Detected! 🥩 Hungry Dino!";
             toastText = "Dinosaur is moving towards the meat!";
             statusColor = "#f43f5e"; // Rose/Red
           } else if (this.treeVisible) {
-            statusText = "Dino & Tree Spotted 🌲";
-            toastText = "Dinosaur ignores the tree. Looking for food...";
-            statusColor = "#3b82f6"; // Blue
+            statusText = "Tree Spotted! 🌲 Interaction Mode";
+            toastText = "Dino walks to the tree to scratch against it!";
+            statusColor = "#10b981"; // Vibrant Green
           }
         } else {
           if (isMeatActive) {
@@ -181,12 +190,23 @@
         const model = this.dinoModel.object3D;
         const isMeatActive = this.meatVisible || window.isMeatSimulated;
 
+        // Dynamic Lighting State Properties
+        let targetLightColor = new THREE.Color("#ffffff");
+        let targetIntensity = 1.2;
+
         if (isMeatActive) {
+          // ==========================================
+          // STATE 1: WALK / EAT MEAT (High Priority)
+          // ==========================================
+          if (this.isScratching) {
+            this.isScratching = false;
+            if (window.dinoAudio) window.dinoAudio.stopScratching();
+            if (this.treeGltf) this.treeGltf.object3D.rotation.z = 0;
+          }
+
           // Calculate Meat 3D world position
           const meatWorldPos = new THREE.Vector3();
-          
           if (window.isMeatSimulated) {
-            // Mock simulation offset: placed 0.25 units to the right, slightly forward relative to dino card
             const dinoWorldPos = new THREE.Vector3();
             this.el.object3D.getWorldPosition(dinoWorldPos);
             meatWorldPos.copy(dinoWorldPos).add(new THREE.Vector3(0.25, 0, -0.05));
@@ -200,34 +220,32 @@
 
           const currentWorldPos = new THREE.Vector3();
           wrapper.getWorldPosition(currentWorldPos);
-
-          // Get distance in 3D world coordinates
           const distance = currentWorldPos.distanceTo(meatWorldPos);
-          
-          // Map meat position into dinoTarget local coordinate space
           const localTargetPos = this.el.object3D.worldToLocal(meatWorldPos.clone());
-          
-          // Constrain movement to the flat plane
           localTargetPos.y = 0;
 
-          // If far from food, walk towards it
+          // Proximity light glow calculations
+          if (distance < 0.6) {
+            const t = Math.max(0, 1 - (distance / 0.6));
+            targetLightColor.lerp(new THREE.Color("#f43f5e"), t);
+            targetIntensity = 1.2 + (t * 0.4);
+          }
+
           if (distance > 0.24) {
+            // Walk to food
             if (this.isEating) {
               this.isEating = false;
+              if (window.dinoAudio) window.dinoAudio.stopChewing();
             }
 
-            // Calculate rotation angle towards food
             const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
-            
-            // Interpolate rotation smoothly
             let diff = angle - wrapper.rotation.y;
             while (diff < -Math.PI) diff += Math.PI * 2;
             while (diff > Math.PI) diff -= Math.PI * 2;
             wrapper.rotation.y += diff * 0.1;
 
-            // Translate towards food
             const dir = new THREE.Vector3().subVectors(localTargetPos, wrapper.position).normalize();
-            const walkSpeed = 0.24 * (timeDelta / 1000); // 0.24 units/second
+            const walkSpeed = 0.72 * (timeDelta / 1000);
             wrapper.position.addScaledVector(dir, walkSpeed);
 
             if (!this.isWalking) {
@@ -237,15 +255,16 @@
                 loop: 'repeat',
                 crossFadeDuration: 0.3
               });
+              if (window.dinoAudio) window.dinoAudio.startWalking();
             }
 
-            // Bobbing & sway backup motion (if skeletal animation isn't loading)
             model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
-            model.rotation.z = Math.sin(time * 0.006) * 0.05; // slight roll sway
+            model.rotation.z = Math.sin(time * 0.006) * 0.05;
             
           } else {
-            // Close enough! Eat / Attack animation
+            // Eat food
             this.isWalking = false;
+            if (window.dinoAudio) window.dinoAudio.stopWalking();
 
             if (!this.isEating) {
               this.isEating = true;
@@ -254,11 +273,10 @@
                 loop: 'repeat',
                 crossFadeDuration: 0.3
               });
+              if (window.dinoAudio) window.dinoAudio.startChewing();
 
-              // Shrink the target meat dynamically to animate it getting eaten!
               const meatModel = document.querySelector("#meat-model-entity");
               const meatFallback = document.querySelector("#meat-fallback");
-              
               if (meatModel) {
                 meatModel.setAttribute("animation", "property: scale; to: 0 0 0; dur: 2000; easing: easeOutQuad");
               }
@@ -267,27 +285,120 @@
               }
             }
 
-            // Keep facing the food (only if not extremely close to avoid atan2 instability)
             const localDist = wrapper.position.distanceTo(localTargetPos);
             if (localDist > 0.05) {
               const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
               wrapper.rotation.y = angle;
             }
             
-            // Stop bobbing, stay flat
             model.position.y = 0;
             model.rotation.z = 0;
           }
+
+        } else if (this.treeVisible && this.treeTarget) {
+          // ==========================================
+          // STATE 2: WALK / SCRATCH TREE (Fallback)
+          // ==========================================
+          if (this.isEating) {
+            this.isEating = false;
+            if (window.dinoAudio) window.dinoAudio.stopChewing();
+          }
+
+          const treeWorldPos = new THREE.Vector3();
+          this.treeTarget.object3D.getWorldPosition(treeWorldPos);
+
+          const currentWorldPos = new THREE.Vector3();
+          wrapper.getWorldPosition(currentWorldPos);
+          const distance = currentWorldPos.distanceTo(treeWorldPos);
+          const localTargetPos = this.el.object3D.worldToLocal(treeWorldPos.clone());
+          localTargetPos.y = 0;
+
+          // Proximity light glow calculations
+          if (distance < 0.6) {
+            const t = Math.max(0, 1 - (distance / 0.6));
+            targetLightColor.lerp(new THREE.Color("#10b981"), t);
+            targetIntensity = 1.2 + (t * 0.3);
+          }
+
+          if (distance > 0.24) {
+            // Walk to Tree
+            if (this.isScratching) {
+              this.isScratching = false;
+              if (window.dinoAudio) window.dinoAudio.stopScratching();
+              if (this.treeGltf) this.treeGltf.object3D.rotation.z = 0;
+            }
+
+            const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
+            let diff = angle - wrapper.rotation.y;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            wrapper.rotation.y += diff * 0.1;
+
+            const dir = new THREE.Vector3().subVectors(localTargetPos, wrapper.position).normalize();
+            const walkSpeed = 0.72 * (timeDelta / 1000);
+            wrapper.position.addScaledVector(dir, walkSpeed);
+
+            if (!this.isWalking) {
+              this.isWalking = true;
+              this.dinoModel.setAttribute('animation-mixer', {
+                clip: this.clipWalk,
+                loop: 'repeat',
+                crossFadeDuration: 0.3
+              });
+              if (window.dinoAudio) window.dinoAudio.startWalking();
+            }
+
+            model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
+            model.rotation.z = Math.sin(time * 0.006) * 0.05;
+
+          } else {
+            // Scratch Tree
+            this.isWalking = false;
+            if (window.dinoAudio) window.dinoAudio.stopWalking();
+
+            if (!this.isScratching) {
+              this.isScratching = true;
+              this.dinoModel.setAttribute('animation-mixer', {
+                clip: this.clipEat,
+                loop: 'repeat',
+                crossFadeDuration: 0.3
+              });
+              if (window.dinoAudio) window.dinoAudio.startScratching();
+            }
+
+            // Animate Tree Shaking
+            if (this.treeGltf) {
+              this.treeGltf.object3D.rotation.z = Math.sin(time * 0.03) * 0.06;
+            }
+
+            const localDist = wrapper.position.distanceTo(localTargetPos);
+            if (localDist > 0.05) {
+              const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
+              wrapper.rotation.y = angle;
+            }
+
+            model.position.y = 0;
+            model.rotation.z = 0;
+          }
+
         } else {
-          // Meat target is not detected. Return to original card center (0,0,0)
+          // ==========================================
+          // STATE 3: WALK HOME / IDLE (Rest)
+          // ==========================================
+          if (this.isScratching) {
+            this.isScratching = false;
+            if (window.dinoAudio) window.dinoAudio.stopScratching();
+            if (this.treeGltf) this.treeGltf.object3D.rotation.z = 0;
+          }
+          if (this.isEating) {
+            this.isEating = false;
+            if (window.dinoAudio) window.dinoAudio.stopChewing();
+          }
+
           const distToHome = wrapper.position.distanceTo(this.homePos);
 
           if (distToHome > 0.01) {
-            if (this.isEating) {
-              this.isEating = false;
-            }
-
-            // Restore meat dimensions if it was eaten and then lost
+            // Restore meat dimensions if lost
             const meatModel = document.querySelector("#meat-model-entity");
             const meatFallback = document.querySelector("#meat-fallback");
             if (meatModel) {
@@ -299,16 +410,14 @@
               meatFallback.setAttribute("scale", "1 1 1");
             }
 
-            // Calculate rotation towards center
             const angle = Math.atan2(0 - wrapper.position.x, 0 - wrapper.position.z);
             let diff = angle - wrapper.rotation.y;
             while (diff < -Math.PI) diff += Math.PI * 2;
             while (diff > Math.PI) diff -= Math.PI * 2;
             wrapper.rotation.y += diff * 0.1;
 
-            // Move towards center
             const dir = new THREE.Vector3().subVectors(this.homePos, wrapper.position).normalize();
-            const walkSpeed = 0.24 * (timeDelta / 1000);
+            const walkSpeed = 0.72 * (timeDelta / 1000);
             wrapper.position.addScaledVector(dir, walkSpeed);
 
             if (!this.isWalking) {
@@ -318,16 +427,35 @@
                 loop: 'repeat',
                 crossFadeDuration: 0.3
               });
+              if (window.dinoAudio) window.dinoAudio.startWalking();
             }
 
             model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
             model.rotation.z = Math.sin(time * 0.006) * 0.05;
 
           } else {
-            // Arrived at home position. Stand idle.
-            if (this.isWalking || this.isEating) {
+            // Arrived home, stand idle
+            if (this.isWalking) {
               this.resetDino();
             }
+          }
+        }
+
+        // Apply Dynamic Proximity Lights smoothly
+        if (this.ambientLight) {
+          const lightComponent = this.ambientLight.getAttribute("light");
+          if (lightComponent) {
+            const currentColor = new THREE.Color(lightComponent.color || "#ffffff");
+            currentColor.lerp(targetLightColor, 0.08);
+            
+            const currentIntensity = parseFloat(lightComponent.intensity || 1.2);
+            const nextIntensity = currentIntensity + (targetIntensity - currentIntensity) * 0.08;
+            
+            this.ambientLight.setAttribute("light", {
+              type: "ambient",
+              color: "#" + currentColor.getHexString(),
+              intensity: nextIntensity
+            });
           }
         }
       },
@@ -335,6 +463,13 @@
       resetDino: function () {
         this.isWalking = false;
         this.isEating = false;
+        this.isScratching = false;
+
+        if (window.dinoAudio) {
+          window.dinoAudio.stopWalking();
+          window.dinoAudio.stopChewing();
+          window.dinoAudio.stopScratching();
+        }
         
         if (!this.dinoWrapper || !this.dinoModel) return;
         const wrapper = this.dinoWrapper.object3D;
@@ -346,10 +481,14 @@
         model.position.set(0, 0, 0);
         model.rotation.set(0, 0, 0);
 
+        if (this.treeGltf) {
+          this.treeGltf.object3D.rotation.z = 0;
+        }
+
         this.dinoModel.setAttribute('animation-mixer', {
           clip: this.clipIdle,
           loop: 'repeat',
-          crossFadeDuration: 0.3
+          crossDuration: 0.3
         });
 
         // Reset meat elements
@@ -393,6 +532,260 @@
         });
       }
     });
+
+    // =========================================================================
+    // 4. REGISTER WEB AUDIO API SYNTHESIZER
+    // =========================================================================
+    class ARAudioSynthesizer {
+      constructor() {
+        this.ctx = null;
+        this.walkInterval = null;
+        this.isWalking = false;
+        this.chewInterval = null;
+        this.isChewing = false;
+        this.scratchInterval = null;
+        this.isScratching = false;
+      }
+
+      init() {
+        if (this.ctx) return;
+        const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+        if (!AudioContextClass) return;
+        this.ctx = new AudioContextClass();
+        console.log("[ARAudioSynthesizer] AudioContext initialized successfully.");
+      }
+
+      resume() {
+        if (this.ctx && this.ctx.state === 'suspended') {
+          this.ctx.resume();
+        }
+      }
+
+      playRoar() {
+        this.init();
+        this.resume();
+        if (!this.ctx) return;
+
+        const now = this.ctx.currentTime;
+        
+        // 1. Create nodes
+        const osc1 = this.ctx.createOscillator();
+        const osc2 = this.ctx.createOscillator();
+        const noiseNode = this.ctx.createBufferSource();
+        const lowpass = this.ctx.createBiquadFilter();
+        const mainGain = this.ctx.createGain();
+
+        // 2. Configure noise (textured growl)
+        const bufferSize = this.ctx.sampleRate * 2.0; // 2 seconds of noise
+        const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+        const data = buffer.getChannelData(0);
+        for (let i = 0; i < bufferSize; i++) {
+          data[i] = Math.random() * 2 - 1;
+        }
+        noiseNode.buffer = buffer;
+        noiseNode.loop = true;
+
+        // Noise filter (guttural gravel)
+        const noiseFilter = this.ctx.createBiquadFilter();
+        noiseFilter.type = 'bandpass';
+        noiseFilter.frequency.setValueAtTime(100, now);
+        noiseFilter.Q.setValueAtTime(4.0, now);
+
+        const noiseGain = this.ctx.createGain();
+        noiseGain.gain.setValueAtTime(0.5, now);
+        noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 1.8);
+
+        // 3. Configure low pitch oscillators
+        osc1.type = 'sawtooth';
+        osc1.frequency.setValueAtTime(80, now);
+        osc1.frequency.exponentialRampToValueAtTime(35, now + 1.5);
+
+        osc2.type = 'triangle';
+        osc2.frequency.setValueAtTime(85, now);
+        osc2.frequency.exponentialRampToValueAtTime(30, now + 1.5);
+
+        const oscGain = this.ctx.createGain();
+        oscGain.gain.setValueAtTime(0.8, now);
+        oscGain.gain.exponentialRampToValueAtTime(0.01, now + 1.8);
+
+        // 4. Lowpass Filter
+        lowpass.type = 'lowpass';
+        lowpass.frequency.setValueAtTime(300, now);
+        lowpass.frequency.exponentialRampToValueAtTime(90, now + 1.8);
+        lowpass.Q.setValueAtTime(6.0, now);
+
+        // 5. Connect Everything
+        osc1.connect(oscGain);
+        osc2.connect(oscGain);
+        
+        noiseNode.connect(noiseFilter);
+        noiseFilter.connect(noiseGain);
+
+        oscGain.connect(lowpass);
+        noiseGain.connect(lowpass);
+        
+        lowpass.connect(mainGain);
+        mainGain.connect(this.ctx.destination);
+
+        // 6. Main Gain volume envelope
+        mainGain.gain.setValueAtTime(0, now);
+        mainGain.gain.linearRampToValueAtTime(0.9, now + 0.1);
+        mainGain.gain.exponentialRampToValueAtTime(0.4, now + 0.8);
+        mainGain.gain.exponentialRampToValueAtTime(0.001, now + 1.8);
+
+        // 7. Start & Stop
+        osc1.start(now);
+        osc2.start(now);
+        noiseNode.start(now);
+
+        osc1.stop(now + 1.8);
+        osc2.stop(now + 1.8);
+        noiseNode.stop(now + 1.8);
+      }
+
+      startWalking() {
+        this.init();
+        this.resume();
+        if (!this.ctx || this.isWalking) return;
+        this.isWalking = true;
+
+        const playStep = () => {
+          const now = this.ctx.currentTime;
+          
+          // Low freq footstep thud
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(65, now);
+          osc.frequency.exponentialRampToValueAtTime(20, now + 0.25);
+          
+          gain.gain.setValueAtTime(0.6, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+          
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          
+          osc.start(now);
+          osc.stop(now + 0.3);
+        };
+
+        // Play footsteps every 800ms
+        playStep();
+        this.walkInterval = setInterval(playStep, 800);
+      }
+
+      stopWalking() {
+        if (this.walkInterval) {
+          clearInterval(this.walkInterval);
+          this.walkInterval = null;
+        }
+        this.isWalking = false;
+      }
+
+      startChewing() {
+        this.init();
+        this.resume();
+        if (!this.ctx || this.isChewing) return;
+        this.isChewing = true;
+
+        const playChew = () => {
+          const now = this.ctx.currentTime;
+          
+          // Synthetic bite/crunch: bandpass filtered noise bursts
+          const bufferSize = this.ctx.sampleRate * 0.15; // 0.15 seconds
+          const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+          const data = buffer.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) {
+            data[i] = Math.random() * 2 - 1;
+          }
+          
+          const noise = this.ctx.createBufferSource();
+          noise.buffer = buffer;
+          
+          const filter = this.ctx.createBiquadFilter();
+          filter.type = 'bandpass';
+          filter.frequency.setValueAtTime(600, now);
+          filter.Q.setValueAtTime(2.0, now);
+          
+          const gain = this.ctx.createGain();
+          gain.gain.setValueAtTime(0.4, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+          
+          noise.connect(filter);
+          filter.connect(gain);
+          gain.connect(this.ctx.destination);
+          
+          noise.start(now);
+          noise.stop(now + 0.15);
+        };
+
+        playChew();
+        this.chewInterval = setInterval(playChew, 350); // Fast chewing sounds
+      }
+
+      stopChewing() {
+        if (this.chewInterval) {
+          clearInterval(this.chewInterval);
+          this.chewInterval = null;
+        }
+        this.isChewing = false;
+      }
+
+      startScratching() {
+        this.init();
+        this.resume();
+        if (!this.ctx || this.isScratching) return;
+        this.isScratching = true;
+
+        const playRustle = () => {
+          const now = this.ctx.currentTime;
+          
+          // Sound of leaves rustling and branch scraping (white noise + higher frequency BP filter)
+          const bufferSize = this.ctx.sampleRate * 0.25; // 0.25 seconds
+          const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
+          const data = buffer.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) {
+            data[i] = Math.random() * 2 - 1;
+          }
+          
+          const noise = this.ctx.createBufferSource();
+          noise.buffer = buffer;
+          
+          const filter = this.ctx.createBiquadFilter();
+          filter.type = 'bandpass';
+          filter.frequency.setValueAtTime(2200, now);
+          filter.Q.setValueAtTime(1.0, now);
+          
+          const gain = this.ctx.createGain();
+          // Modulate gain slightly for scratching texture
+          gain.gain.setValueAtTime(0.2, now);
+          gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
+          
+          noise.connect(filter);
+          filter.connect(gain);
+          gain.connect(this.ctx.destination);
+          
+          noise.start(now);
+          noise.stop(now + 0.25);
+        };
+
+        playRustle();
+        this.scratchInterval = setInterval(playRustle, 500); // Scratch every 500ms
+      }
+
+      stopScratching() {
+        if (this.scratchInterval) {
+          clearInterval(this.scratchInterval);
+          this.scratchInterval = null;
+        }
+        this.isScratching = false;
+      }
+    }
+
+    // Instantiated globally so entities and UI can trigger it
+    window.dinoAudio = new ARAudioSynthesizer();
   </script>
 
   <style>
@@ -630,9 +1023,10 @@
     color-space="sRGB" 
     renderer="colorManagement: true, physicallyCorrectLights" 
     vr-mode-ui="enabled: false" 
-    device-orientation-permission-ui="enabled: false">
+    device-orientation-permission-ui="enabled: false"
+    shadow="type: pcfsoft">
     
-    <a-assets timeout="5000">
+    <a-assets timeout="15000">
       <!-- Dinosaur Model (Giganotosaurus) -->
       <a-asset-item id="dinoModel" src="assets/dino.glb"></a-asset-item>
       
@@ -644,8 +1038,8 @@
     <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
 
     <!-- Scene Lighting -->
-    <a-entity light="type: ambient; color: #ffffff; intensity: 1.2"></a-entity>
-    <a-entity light="type: directional; color: #ffffff; intensity: 0.8" position="-0.5 1 1"></a-entity>
+    <a-entity id="ambient-light" light="type: ambient; color: #ffffff; intensity: 1.2"></a-entity>
+    <a-entity id="main-light" light="type: directional; color: #ffffff; intensity: 0.8; castShadow: true; shadowMapHeight: 2048; shadowMapWidth: 2048; shadowCameraLeft: -1; shadowCameraRight: 1; shadowCameraTop: 1; shadowCameraBottom: -1; shadowCameraNear: 0.1; shadowCameraFar: 10" position="-0.5 1 1"></a-entity>
 
     <!-- Target Index 2: Dinosaur Card -->
     <a-entity id="dino-target" mindar-image-target="targetIndex: 2" dino-behavior>
@@ -661,16 +1055,19 @@
           id="dino-model" 
           rotation="0 0 0" 
           position="0 0 0.05" 
-          scale="0.08 0.08 0.08" 
-          src="#dinoModel">
+          scale="0.25 0.25 0.25" 
+          src="#dinoModel"
+          shadow="cast: true; receive: true">
         </a-gltf-model>
       </a-entity>
+      <a-plane rotation="-90 0 0" width="2" height="2" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
     </a-entity>
 
     <!-- Target Index 1: Tree Card -->
     <a-entity id="tree-target" mindar-image-target="targetIndex: 1">
       <a-entity id="tree-model-entity" position="0 0 0">
-        <a-gltf-model src="#treeModel" scale="0.005 0.005 0.005" rotation="0 0 0" position="0.41 0 0.05" animation-mixer="clip: MorphBake; loop: repeat" tree-color-patch></a-gltf-model>
+        <a-gltf-model src="#treeModel" scale="0.005 0.005 0.005" rotation="90 0 0" position="0.41 0 0.05" animation-mixer="clip: MorphBake; loop: repeat" tree-color-patch shadow="cast: true; receive: true"></a-gltf-model>
+        <a-plane rotation="-90 0 0" width="1" height="1" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
         <a-entity id="tree-fallback" position="0 0 0" rotation="90 0 0" visible="false">
           <a-cone color="#10b981" height="0.35" radius-bottom="0.1" position="0 0.175 0" material="roughness: 0.3; metalness: 0.1"></a-cone>
           <a-cylinder color="#78350f" height="0.1" radius="0.02" position="0 0.05 0"></a-cylinder>
@@ -681,7 +1078,8 @@
     <!-- Target Index 0: Meat Card -->
     <a-entity id="meat-target" mindar-image-target="targetIndex: 0">
       <a-entity id="meat-model-entity" position="0 0 0">
-        <a-gltf-model src="#meatModel" scale="0.05 0.05 0.05" rotation="90 0 0" position="0 0 0.05"></a-gltf-model>
+        <a-gltf-model src="#meatModel" scale="0.02 0.02 0.02" rotation="90 0 0" position="0 0 0.05" shadow="cast: true; receive: true"></a-gltf-model>
+        <a-plane rotation="-90 0 0" width="1" height="1" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
         <a-entity id="meat-fallback" position="0 0 0" rotation="90 0 0" visible="false">
           <a-sphere color="#f43f5e" radius="0.04" position="0 0.04 0" scale="1.4 0.9 0.9" material="roughness: 0.4; metalness: 0.2; emissive: #881337; emissiveIntensity: 0.2"></a-sphere>
           <a-cylinder color="#ffffff" height="0.06" radius="0.01" rotation="0 0 45" position="-0.03 0.02 0"></a-cylinder>
@@ -720,6 +1118,12 @@
       `;
 
       const startARScanner = () => {
+        // Initialize Web Audio context from user gesture
+        if (window.dinoAudio) {
+          window.dinoAudio.init();
+          window.dinoAudio.resume();
+        }
+
         startScreen.style.display = "none";
         scanBox.style.display = "block";
         statusToast.style.display = "block";
@@ -733,7 +1137,6 @@
           arSystem.start();
         }
       };
-
       const toggleSimulation = () => {
         if (startScreen.style.display !== "none") {
           return;
@@ -803,6 +1206,15 @@
             }
           }
         }
+      });
+
+      // MindAR camera/engine start error event listener
+      arScene.addEventListener("arError", (event) => {
+        console.error("MindAR start error:", event);
+        headerStatus.textContent = "Camera Error ❌";
+        headerStatus.style.color = "#ef4444";
+        statusToast.textContent = "Camera access blocked. Please check HTTPS and permissions.";
+        alert("Camera Error: Access was blocked or failed.\n\nMake sure:\n1. You are visiting via HTTPS (not HTTP)\n2. Camera permissions are allowed.");
       });
     });
   </script>

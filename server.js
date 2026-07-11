@@ -104,7 +104,9 @@ const MIME_TYPES = {
 // This function runs every single time a web browser requests a page or file.
 // ============================================================================
 function handleRequest(req, res) {
-  const decodedUrl = decodeURI(req.url);
+  // Strip query parameters (like ?autostart=true) before resolving the file path
+  const urlPath = req.url.split('?')[0];
+  const decodedUrl = decodeURI(urlPath);
   
   // Custom routing dispatch
   let filePath;
