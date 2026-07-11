@@ -1,53 +1,59 @@
-/**
- * Hey May! This is our Node.js Server script for the 3D Model Tracking project.
- * 
- * Why do we need a custom server instead of just opening index.html directly on our laptop?
- * 
- * 1. Mobile Camera Security (HTTPS):
- *    May, modern mobile browsers (like iOS Safari or Android Chrome) block webcam access completely 
- *    unless the page is served over a secure, encrypted connection (HTTPS). The only exception is 
- *    'localhost' on a desktop. To test this on your phone, our server has to use HTTPS.
- * 
- * 2. Serving 3D models with correct headers:
- *    This server supports loading modern 3D model formats (.gltf and .glb) using correct mime types 
- *    so the browser parses them correctly.
- * 
- * This Node.js script spins up both servers natively without requiring heavy backend frameworks!
- */
+// ============================================================================
+// 1. CORE NODE.JS MODULE IMPORTS
+// ============================================================================
+/*
+  May, Node.js comes packaged with built-in helper toolkits called modules.
+  We import them here to handle files, network sockets, and directories:
+*/
+const https = require('https');   // Handles secure encrypted HTTPS socket connections
+const http = require('http');     // Handles standard unsecured HTTP socket connections
+const fs = require('fs');         // File System: allows us to read/write files from the laptop disk
+const path = require('path');     // Handles system-independent file directory path resolutions
+const os = require('os');         // Operating System: queries computer details (like network IPs)
+const { execSync } = require('child_process'); // Runs native terminal commands directly from our script
 
 // ============================================================================
-// 1. MODULE IMPORTS (Core Node.js Built-in Libraries)
+// 2. THIRD-PARTY MODULE IMPORTS (NPM DEPENDENCIES)
 // ============================================================================
-const http = require('http');
-const https = require('https');
-const fs = require('fs');
-const path = require('path');
-const os = require('os');
-const { execSync } = require('child_process');
+/*
+  These are libraries installed via package.json.
+  We use them to generate QR codes inside the developer command terminal and images.
+*/
+const qrcodeTerminal = require('qrcode-terminal'); // Prints black-and-white QR codes directly into shell logs
+const QRCode = require('qrcode');                  // Generates high-res QR code image files (.png)
 
 // ============================================================================
-// 2. EXTERNAL LIBRARIES (Installed via npm install)
+// 3. SERVER PORT CONFIGURATION
 // ============================================================================
-const qrcodeTerminal = require('qrcode-terminal');
-const QRCode = require('qrcode');
+const PORT_HTTPS = 3030; // Secure camera port: mobile phones require HTTPS to allow camera access
+const PORT_HTTP = 8080;  // Regular preview port: use this for local testing on your laptop browser
+
+// Paths where SSL certificates will be saved
+const keyPath = path.join(__dirname, 'key.pem');   // Private encryption key
+const certPath = path.join(__dirname, 'cert.pem'); // Public digital certificate file
 
 // ============================================================================
-// 3. PORT CONFIGURATION
+// 4. SSL CERTIFICATE GENERATOR (HTTPS BINDING SECURITY)
 // ============================================================================
-const PORT_HTTPS = 3030; // Secure port. Point your mobile phone browser to this port.
-const PORT_HTTP = 8080;  // Fallback unsecured port. Use this for quick previewing on your laptop.
+/*
+  May, modern smartphone browsers (Safari, Chrome) enforce a strict security rule:
+  "Websites cannot open the user's camera unless they are loaded over a secure HTTPS line."
+  
+  To allow testing locally without buying a commercial web domain, we generate a 
+  "Self-Signed SSL Certificate" right here. This certificates encrypts the data 
+  exchanged between your laptop and your phone.
+  
+  This function checks if the certificate files exist. If not, it executes the
+  'openssl' program on your terminal to create key.pem and cert.pem files.
+*/
+function checkAndGenerateCertificates() {
+  if (fs.existsSync(keyPath) && fs.existsSync(certPath)) {
+    return; // Certificates already exist, skip generation
+  }
 
-// Resolve the absolute file paths on disk for the SSL/TLS private key and certificate files.
-const keyPath = path.join(__dirname, 'key.pem');
-const certPath = path.join(__dirname, 'cert.pem');
-
-// ============================================================================
-// 4. AUTOMATIC SSL/TLS CERTIFICATE GENERATION:
-// Checks for self-signed certificates. If missing, runs OpenSSL natively to create them.
-// ============================================================================
-if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
-  console.log('Generating self-signed SSL/TLS certificates for HTTPS camera access on smartphones...');
+  console.log('🔑 Generating self-signed SSL certificates for secure HTTPS testing...');
   try {
+    // Run terminal command to generate credentials natively using OpenSSL
     execSync(
       `openssl req -x509 -newkey rsa:2048 -keyout "${keyPath}" -out "${certPath}" -sha256 -days 365 -nodes -subj "/CN=localhost"`,
       { stdio: 'inherit' }
@@ -55,21 +61,29 @@ if (!fs.existsSync(keyPath) || !fs.existsSync(certPath)) {
     console.log('Certificates generated successfully (key.pem, cert.pem).\n');
   } catch (error) {
     console.error('Failed to generate SSL certificates natively. Please check if openssl is installed.', error);
-    process.exit(1);
+    process.exit(1); // Exit program with error
   }
 }
 
+// Ensure certificates are generated before booting servers
+checkAndGenerateCertificates();
+
 // ============================================================================
-// 5. LOCAL IP NETWORK RESOLUTION:
-// Resolves your computer's local Wi-Fi IP address.
-// This allows you to type the URL (e.g. https://192.168.1.15:3030) on your phone.
+// 5. LOCAL IP NETWORK RESOLUTION (MOBILE CONNECTIVITY)
 // ============================================================================
+/*
+  To test on your smartphone, your phone and your laptop must be connected to the 
+  same Wi-Fi router. We inspect the computer's network interface cards to resolve 
+  your laptop's local IP address (e.g. 192.168.1.168).
+  This tells your phone exactly where to request the files.
+*/
 function getLocalIPAddresses() {
   const interfaces = os.networkInterfaces();
   const addresses = [];
   
   for (const name in interfaces) {
     for (const netInterface of interfaces[name]) {
+      // Filter out internal localhost addresses (127.0.0.1) and only extract IPv4
       if (netInterface.family === 'IPv4' && !netInterface.internal) {
         addresses.push(netInterface.address);
       }
@@ -81,9 +95,13 @@ function getLocalIPAddresses() {
 const localIPs = getLocalIPAddresses();
 
 // ============================================================================
-// 6. MIME TYPES MAP:
-// Tells the browser what kind of file is being transmitted so it knows how to execute/display it.
+// 6. MIME TYPES MAP (TELLING THE BROWSER WHAT FILE IS WHAT)
 // ============================================================================
+/*
+  When a browser requests a file, it relies on the "Content-Type" header to know
+  whether it is reading HTML layout, Javascript scripts, CSS styles, or a 3D model.
+  This dictionary maps file extensions to their official MIME identifiers.
+*/
 const MIME_TYPES = {
   '.html': 'text/html',
   '.css': 'text/css',
@@ -94,40 +112,47 @@ const MIME_TYPES = {
   '.gif': 'image/gif',
   '.svg': 'image/svg+xml',
   '.mp4': 'video/mp4',
-  '.mind': 'application/octet-stream', // Binary compiled target features signature file
-  '.gltf': 'model/gltf+json',          // glTF 3D model format (JSON based)
-  '.glb': 'model/gltf-binary'          // GLB 3D model format (compiled binary)
+  '.mind': 'application/octet-stream', // Compiled computer-vision tracking descriptor targets file
+  '.gltf': 'model/gltf+json',          // JSON-based 3D model descriptor format
+  '.glb': 'model/gltf-binary'          // Binary compiled 3D model format
 };
 
 // ============================================================================
-// 7. THE MAIN REQUEST HANDLER:
-// This function runs every single time a web browser requests a page or file.
+// 7. MAIN ROUTING REQUEST HANDLER
 // ============================================================================
+/*
+  This function triggers every single time a browser requests a URL.
+  It reads the requested path, checks security permissions, and pipes the 
+  corresponding file data back to the browser.
+*/
 function handleRequest(req, res) {
-  // Strip query parameters (like ?autostart=true) before resolving the file path
+  // Strip query parameters (like index.html?autostart=true) to isolate raw file paths
   const urlPath = req.url.split('?')[0];
   const decodedUrl = decodeURI(urlPath);
   
-  // Custom routing dispatch
+  // Custom Routing Dispatch: map URLs to local disk files
   let filePath;
   if (decodedUrl === '/' || decodedUrl === '') {
-    filePath = path.join(__dirname, 'index.html');
+    filePath = path.join(__dirname, 'index.html'); // Default home route
   } else if (decodedUrl === '/preview') {
-    filePath = path.join(__dirname, 'preview.html');
+    filePath = path.join(__dirname, 'preview.html'); // Preview sandbox page
   } else {
-    filePath = path.join(__dirname, decodedUrl);
+    filePath = path.join(__dirname, decodedUrl); // Relative assets paths
   }
   
-  // Security guard against Directory Traversal
+  // Security Guard against Directory Traversal attacks:
+  // Prevents malicious URL inputs (like ../../etc/passwd) from escaping our root folder.
   if (!filePath.startsWith(__dirname)) {
     res.writeHead(403, { 'Content-Type': 'text/plain' });
     return res.end('Forbidden');
   }
 
+  // If path is a folder, resolve to index.html internally
   if (fs.existsSync(filePath) && fs.statSync(filePath).isDirectory()) {
     filePath = path.join(filePath, 'index.html');
   }
 
+  // File Not Found (404) fallback
   if (!fs.existsSync(filePath)) {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     return res.end('404 Not Found');
@@ -138,13 +163,28 @@ function handleRequest(req, res) {
   const stat = fs.statSync(filePath);
   const fileSize = stat.size;
 
-  // Support range requests (particularly for any video elements or media streaming if added later)
+  // ==========================================================================
+  // HTTP RANGE REQUESTS SYSTEM (IOS COMPATIBILITY PATCH)
+  // ==========================================================================
+  /*
+    May, this is a massive gotcha!
+    Safari on iPhones and iPads refuses to play media assets (like audio waves or video clips) 
+    unless the server supports "Range Requests". 
+    Instead of asking for the whole file at once, iOS asks for small chunks (e.g. "bytes 0-100").
+    If the server does not support this and sends back 200 OK with the entire file, 
+    iOS simply displays a broken media player and refuses to play anything.
+    
+    This block intercepts requests containing `headers.range` for MP4/MP3 media files,
+    reads only the specific range slices requested, and responds with a HTTP status code:
+    `206 Partial Content`, ensuring seamless playback on mobile Safari.
+  */
   if (contentType === 'video/mp4' && req.headers.range) {
     const range = req.headers.range;
     const parts = range.replace(/bytes=/, "").split("-");
     const start = parseInt(parts[0], 10);
     const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
 
+    // Range checks
     if (start >= fileSize || end >= fileSize) {
       res.writeHead(416, { 'Content-Range': `bytes */${fileSize}` });
       return res.end();
@@ -160,27 +200,31 @@ function handleRequest(req, res) {
     };
     
     res.writeHead(206, head);
-    file.pipe(res);
+    file.pipe(res); // Streams chunk stream directly to browser
   } else {
+    // Standard File Serving pipeline (200 OK)
     const isCacheableAsset = /\.(glb|gltf|mind|png|jpg|jpeg|webp)$/i.test(filePath);
     const head = {
       'Content-Length': fileSize,
       'Content-Type': contentType,
     };
+
+    // Performance Optimization: Cache heavy 3D GLTF models and tracker descriptors 
+    // inside the browser's disk cache for 24 hours. This cuts load times drastically on mobile.
     if (isCacheableAsset) {
-      head['Cache-Control'] = 'public, max-age=86400'; // Cache for 24 hours
+      head['Cache-Control'] = 'public, max-age=86400';
     }
+    
     res.writeHead(200, head);
     fs.createReadStream(filePath).pipe(res);
   }
 }
 
 // ============================================================================
-// 8. FIRE UP THE SERVERS:
-// We launch two servers simultaneously to support local and mobile testing.
+// 8. LAUNCH SERVERS
 // ============================================================================
 
-// A. SECURE HTTPS SERVER:
+// A. SECURE HTTPS SERVER (MOBILE TESTING)
 const sslOptions = {
   key: fs.readFileSync(keyPath),
   cert: fs.readFileSync(certPath),
@@ -191,12 +235,17 @@ httpsServer.listen(PORT_HTTPS, () => {
   console.log('==================================================');
   console.log(`🔒 Secure HTTPS Server (Mobile Testing) running:`);
   console.log(`   On Laptop:  https://localhost:${PORT_HTTPS}`);
+  
+  // Render and export connection details for each network IP address
   localIPs.forEach(ip => {
     const mobileUrl = `https://${ip}:${PORT_HTTPS}`;
     console.log(`   On Mobile:  ${mobileUrl}`);
     console.log(`   Scan the QR code below to open this URL directly on your phone:`);
+    
+    // Generate terminal-friendly visual QR code
     qrcodeTerminal.generate(mobileUrl, { small: true });
 
+    // Save visual PNG QR Code image file for student reference
     const qrImagePath = path.join(__dirname, 'qrcode.png');
     QRCode.toFile(qrImagePath, mobileUrl, {
       color: {
@@ -219,7 +268,7 @@ httpsServer.listen(PORT_HTTPS, () => {
   console.log('==================================================\n');
 });
 
-// B. NON-SECURE HTTP SERVER:
+// B. NON-SECURE HTTP SERVER (LAPTOP PREVIEWS)
 const httpServer = http.createServer(handleRequest);
 httpServer.listen(PORT_HTTP, () => {
   console.log(`🔌 HTTP Preview Server running at http://localhost:${PORT_HTTP}\n`);

@@ -1,35 +1,59 @@
 // =========================================================================
-// 1. MINDAR CAMERA SAFETY PATCH
+// 1. MINDAR CAMERA SAFETY PATCH (PREVENTING STARTUP CRASHES)
 // =========================================================================
-// If targets.mind only has 1 target (index 0) during testing, A-Frame will normally 
-// crash when trying to initialize entities for target 1 (Tree) and 2 (Meat).
-// This patch intercepts setupAnchor and safely skips missing targets instead of crashing.
+/* 
+  May, here is the problem:
+  Normally, if the tracking card package (targets.mind) only includes 1 target image 
+  during tests, but our A-Frame scene defines 3 targets (Dino at index 2, Tree at index 1, 
+  Meat at index 0), MindAR will try to read targets 1 and 2, find they are missing, 
+  and crash. This crash completely locks up the camera and halts the entire app!
+
+  To solve this, we create this "Safety Patch" function. It intercepts MindAR's 
+  internal target-setup method (`setupAnchor`) and says: 
+  "If the targetIndex is larger than the targets loaded, skip it safely instead of crashing!"
+
+  We use POLLING here:
+  A-Frame and MindAR load their scripts asynchronously from remote CDNs. Thus, 
+  AFRAME.registeredSystems might not be defined the exact millisecond index.js runs. 
+  Our script checks if AFRAME is ready. If not, it uses setInterval to check every 
+  50 milliseconds, applying the patch as soon as MindAR is fully instantiated in memory.
+*/
 function applyMindARPatch() {
+  // Check if AFRAME and MindAR system are registered in browser memory
   if (typeof AFRAME !== 'undefined' && AFRAME.registeredSystems && AFRAME.registeredSystems['mindar-image-system']) {
     const systemProto = AFRAME.registeredSystems['mindar-image-system'].prototype;
+    
+    // If the setupAnchor function exists and hasn't been patched yet, wrap it
     if (systemProto && systemProto.setupAnchor && !systemProto.setupAnchor.__patched) {
       const originalSetupAnchor = systemProto.setupAnchor;
+      
+      // Override setupAnchor with our safe version
       systemProto.setupAnchor = function (targetIndex, el) {
+        // If the targetIndex is out of bounds for the loaded targets package, skip setup Anchor
         if (!this.anchors || targetIndex >= this.anchors.length) {
           console.warn(`[MindAR Patch] targetIndex ${targetIndex} is out of bounds for current targets (${this.anchors ? this.anchors.length : 0} loaded). Skipping setup for index ${targetIndex} to prevent camera crash.`);
-          return;
+          return; // Return early without crashing!
         }
+        // Otherwise, run original setupAnchor normally
         return originalSetupAnchor.call(this, targetIndex, el);
       };
-      systemProto.setupAnchor.__patched = true;
+      
+      systemProto.setupAnchor.__patched = true; // Mark as patched
       console.log("[MindAR Patch] Camera crash safety patch applied successfully.");
     }
-    return true;
+    return true; // Patch applied successfully
   }
-  return false;
+  return false; // Not ready yet, please retry
 }
 
+// Execute immediately or set up a 50ms polling loop if libraries are still loading
 if (!applyMindARPatch()) {
   const patchInterval = setInterval(() => {
     if (applyMindARPatch()) {
-      clearInterval(patchInterval);
+      clearInterval(patchInterval); // Stop checking once applied
     }
   }, 50);
+  // Fail-safe: stop checking after 10 seconds to avoid running CPU cycles infinitely
   setTimeout(() => clearInterval(patchInterval), 10000);
 }
 
@@ -37,8 +61,23 @@ if (!applyMindARPatch()) {
 // =========================================================================
 // 2. REGISTER THE INTERACTIVE DINOSAUR BEHAVIOR COMPONENT
 // =========================================================================
+/*
+  In A-Frame, we write custom logic by creating Components. Think of a Component 
+  as a script package we attach to an HTML tag (e.g. <a-entity dino-behavior>).
+  
+  The 'dino-behavior' component controls:
+  - Dinosaur animations, movement, and target checks.
+  - Updating the Heads-Up-Display (HUD) layout.
+  - Communicating with the Web Audio Synthesizer.
+*/
 AFRAME.registerComponent('dino-behavior', {
+  
+  /*
+    init() is called exactly once by A-Frame when the scene initializes.
+    We use this to cache elements, define status flags, and bind event handlers.
+  */
   init: function () {
+    // Cache references to DOM elements in the scene graph
     this.dinoModel = document.querySelector("#dino-model");
     this.dinoWrapper = document.querySelector("#dino-model-wrapper");
     this.meatTarget = document.querySelector("#meat-target");
@@ -46,47 +85,59 @@ AFRAME.registerComponent('dino-behavior', {
     this.treeGltf = document.querySelector("#tree-target a-gltf-model");
     this.ambientLight = document.querySelector("#ambient-light");
     
-    // Tracking states
-    this.dinoCardTracked = false; // Is the dinosaur card physically tracked
-    this.dinoVisible = false; // Is the dinosaur model active/visible on screen
-    this.meatVisible = false;
-    this.treeVisible = false;
+    // Tracking state variables
+    this.dinoCardTracked = false; // Is the physical Dinosaur card currently in camera view?
+    this.dinoVisible = false;     // Is the dinosaur model currently active on screen?
+    this.meatVisible = false;     // Is the Meat card target currently visible?
+    this.treeVisible = false;     // Is the Tree card target currently visible?
+    
+    // Timestamps recording when the camera last saw each target
     this.lastMeatSeenTime = -999999;
     this.lastTreeSeenTime = -999999;
     
-    // State Machine
-    this.state = "IDLE"; // IDLE, WALK_TO_MEAT, EAT, WALK_TO_TREE, WALK_HOME
-    this.eatStartTime = 0;
-    this.meatConsumed = false;
-    this.treeInspected = false;
+    // State Machine Properties
+    // We have 5 states:
+    // - "IDLE": Standing at starting home position waiting for food or trees.
+    // - "WALK_TO_MEAT": Walking towards scanned meat card.
+    // - "EAT": Arrived at meat target, eating, scaling food down, playing sound for 3s.
+    // - "WALK_TO_TREE": Walking towards scanned tree card.
+    // - "WALK_HOME": Walking back to starting origin spot.
+    this.state = "IDLE"; 
+    this.eatStartTime = 0; // Records when the eating process started
+    this.meatConsumed = false; // Prevents dino from running back and forth repeatedly to same meat
+    this.treeInspected = false; // Prevents dino from running back and forth repeatedly to same tree
     
+    // Action helper flags
     this.isEating = false;
     this.isWalking = false;
     this.isScratching = false;
     
-    // Default home state positions
+    // Default home position coords in local space
     this.homePos = new THREE.Vector3(0, 0, 0);
     
-    // Default animations (will overwrite if clips found in your model)
+    // Default animation clips (will be overwritten dynamically below by scanning files)
     this.clipIdle = 'Idle';
     this.clipWalk = 'Walk';
     this.clipEat = 'Attack';
     
+    // Bind context methods so "this" always refers to this component inside listener scopes
     this.updateHUD = this.updateHUD.bind(this);
     this.resetDino = this.resetDino.bind(this);
 
-    // Target found/lost event listeners
+    // DINO CARD: Target Found Listener
     this.el.addEventListener('targetFound', () => {
       this.dinoCardTracked = true;
       this.dinoVisible = true;
       this.updateHUD();
       if (window.dinoAudio) {
-        window.dinoAudio.playRoar();
+        window.dinoAudio.playRoar(); // Trigger growl roar on detection
       }
     });
+
+    // DINO CARD: Target Lost Listener
     this.el.addEventListener('targetLost', () => {
       this.dinoCardTracked = false;
-      // If we are currently idle, reset and hide immediately
+      // If we are currently idle, we hide the dinosaur immediately
       if (this.state === "IDLE") {
         this.dinoVisible = false;
         this.resetDino();
@@ -94,6 +145,7 @@ AFRAME.registerComponent('dino-behavior', {
       this.updateHUD();
     });
 
+    // MEAT CARD: Target Found/Lost Listeners
     if (this.meatTarget) {
       this.meatTarget.addEventListener('targetFound', () => {
         this.meatVisible = true;
@@ -106,6 +158,7 @@ AFRAME.registerComponent('dino-behavior', {
       });
     }
 
+    // TREE CARD: Target Found/Lost Listeners
     if (this.treeTarget) {
       this.treeTarget.addEventListener('targetFound', () => {
         this.treeVisible = true;
@@ -118,24 +171,29 @@ AFRAME.registerComponent('dino-behavior', {
       });
     }
 
-    // Dynamic GLTF animation resolver: scans loaded clips in your GLB file
+    // DYNAMIC GLTF ANIMATION RESOLVER
+    // GLB models created by different artists might name animations 'walk', 'Run', or 'run_cycle'.
+    // To make this app work on any dinosaur model, we listen for A-Frame's model-loaded event,
+    // scan all animation clips packed inside the file, and map them to our variables.
     if (this.dinoModel) {
       this.dinoModel.addEventListener('model-loaded', (e) => {
         const animations = e.detail.model.animations;
         if (animations && animations.length > 0) {
           const animNames = animations.map(a => a.name.toLowerCase());
           
-          // Find index of clips matching name patterns
+          // Match animation names using string search keywords
           const walkIndex = animNames.findIndex(name => name.includes('walk') || name.includes('run'));
           const eatIndex = animNames.findIndex(name => name.includes('eat') || name.includes('attack') || name.includes('bite') || name.includes('hit') || name.includes('chew') || name.includes('roar'));
           const idleIndex = animNames.findIndex(name => name.includes('idle') || name.includes('stay') || name.includes('wait') || name.includes('default'));
           
-          // Fallback to the first animation clip if no matching keyword is found
+          // Apply matching clips, or fallback to first clip in GLTF file if not found
           this.clipWalk = walkIndex !== -1 ? animations[walkIndex].name : animations[0].name;
           this.clipEat = eatIndex !== -1 ? animations[eatIndex].name : animations[0].name;
           this.clipIdle = idleIndex !== -1 ? animations[idleIndex].name : animations[0].name;
           
           console.log(`Resolved GLTF Clips -> Idle: ${this.clipIdle}, Walk: ${this.clipWalk}, Eat: ${this.clipEat}`);
+          
+          // Load default idle animation state
           this.dinoModel.setAttribute('animation-mixer', {
             clip: this.clipIdle,
             loop: 'repeat',
@@ -146,6 +204,9 @@ AFRAME.registerComponent('dino-behavior', {
     }
   },
 
+  /*
+    updateHUD() updates text alerts on the top header bar and bottom status toasts.
+  */
   updateHUD: function () {
     const headerStatus = document.getElementById("header-status");
     const statusToast = document.getElementById("status-toast");
@@ -155,31 +216,33 @@ AFRAME.registerComponent('dino-behavior', {
     let toastText = "Align target cards inside the frame";
     let statusColor = "#ffffff";
     
+    // Check if the meat card is active (visible or simulated)
     const isMeatActive = this.meatVisible || window.isMeatSimulated;
 
     if (this.dinoVisible) {
       if (this.state === "IDLE") {
         statusText = "Dinosaur Detected! 🦖";
         toastText = "Dinosaur is looking around.";
-        statusColor = "#b45309"; // Amber/Brown
+        statusColor = "#b45309"; // Amber yellow
       } else if (this.state === "WALK_TO_MEAT") {
         statusText = "Meat Detected! 🥩 Hungry Dino!";
         toastText = "Dinosaur is moving towards the meat!";
-        statusColor = "#f43f5e"; // Rose/Red
+        statusColor = "#f43f5e"; // Rose red
       } else if (this.state === "EAT") {
         statusText = "Dino is Eating! 🥩 Yum!";
         toastText = "Dinosaur is enjoying its meal.";
-        statusColor = "#f43f5e"; // Rose/Red
+        statusColor = "#f43f5e"; // Rose red
       } else if (this.state === "WALK_TO_TREE") {
         statusText = "Tree Spotted! 🌲 Interaction Mode";
         toastText = "Dino walks to the tree to inspect it!";
-        statusColor = "#10b981"; // Vibrant Green
+        statusColor = "#10b981"; // Vibrant Emerald Green
       } else if (this.state === "WALK_HOME") {
         statusText = "Dino going back home... 🦖";
         toastText = "Dinosaur is returning to its starting spot.";
-        statusColor = "#b45309"; // Amber/Brown
+        statusColor = "#b45309"; // Amber yellow
       }
     } else {
+      // Dino card is not currently tracked
       if (isMeatActive) {
         statusText = "Meat Detected! 🥩";
         toastText = "Scan Dinosaur card to feed it!";
@@ -191,31 +254,45 @@ AFRAME.registerComponent('dino-behavior', {
       }
     }
     
+    // Update texts and styles in the document UI
     headerStatus.textContent = statusText;
     headerStatus.style.color = statusColor;
     statusToast.textContent = toastText;
 
+    // Toggle solid vs dashed guides on the center scanner box
     const scanBox = document.getElementById("scan-box");
     if (scanBox) {
       if (this.dinoVisible || this.treeVisible || isMeatActive) {
-        scanBox.classList.add("tracked");
+        scanBox.classList.add("tracked"); // Solid green border
       } else {
-        scanBox.classList.remove("tracked");
+        scanBox.classList.remove("tracked"); // Dashed indigo border
       }
     }
   },
 
+  /*
+    tick(time, timeDelta) is called by A-Frame on every single frame rendering step.
+    This runs at 60 FPS (roughly every 16.6 milliseconds).
+    We use this loop to:
+    - Update state machine transitions.
+    - Animate 3D coordinates (position and rotation).
+    - Handle grace tracking periods and visibilities.
+  */
   tick: function (time, timeDelta) {
     if (!this.dinoVisible || !this.dinoWrapper || !this.dinoModel) return;
 
-    // Force A-Frame visibility true during travel states to prevent disappearance if dino card is out of view
+    // A-Frame Visibility Hack:
+    // If the dinosaur is walking home or visiting targets and the user camera loses view 
+    // of the dinosaur card, MindAR will immediately hide it. This makes the dino disappear.
+    // To solve this, we override A-Frame visibility: if the dino is active in any travel state,
+    // we force visibility to remain true until it arrives safely back home.
     if (this.state !== "IDLE" || this.dinoCardTracked) {
       this.el.setAttribute("visible", true);
     } else {
       this.el.setAttribute("visible", false);
     }
 
-    // Update target seen timestamps
+    // Update timestamps whenever target cards are visible
     if (this.meatVisible) {
       this.lastMeatSeenTime = time;
     }
@@ -223,14 +300,24 @@ AFRAME.registerComponent('dino-behavior', {
       this.lastTreeSeenTime = time;
     }
 
-    const wrapper = this.dinoWrapper.object3D;
-    const model = this.dinoModel.object3D;
+    const wrapper = this.dinoWrapper.object3D; // Access Three.js 3D wrapper object
+    const model = this.dinoModel.object3D;     // Access Three.js 3D model object
     
-    // Define active status with a 1.5-second (1500ms) tracking-loss grace period
-    const isMeatActive = this.meatVisible || (time - this.lastMeatSeenTime < 1500) || window.isMeatSimulated;
-    const isTreeActive = this.treeVisible || (time - this.lastTreeSeenTime < 1500);
+    // =========================================================================
+    // 💡 MAY - ADJUST THIS: GRACE PERIOD TIMING
+    // If a target card goes out of camera view temporarily (e.g., due to hand wiggles),
+    // we don't want the dino to cancel its walk instantly.
+    // 1500 represents 1.5 seconds. Increase this if you want the dino to stay active 
+    // longer after the camera loses a card, or decrease it for immediate updates.
+    // =========================================================================
+    const gracePeriodMs = 1500;
+    const isMeatActive = this.meatVisible || (time - this.lastMeatSeenTime < gracePeriodMs) || window.isMeatSimulated;
+    const isTreeActive = this.treeVisible || (time - this.lastTreeSeenTime < gracePeriodMs);
 
-    // Dynamic Lighting State Properties
+    // =========================================================================
+    // 💡 MAY - ADJUST THIS: LIGHT COLOR EFFECT
+    // Adjust colors here to change the dynamic light color when dinosaur arrives.
+    // =========================================================================
     let targetLightColor = new THREE.Color("#ffffff");
     let targetIntensity = 1.2;
 
@@ -276,25 +363,27 @@ AFRAME.registerComponent('dino-behavior', {
     }
 
     // ==========================================
-    // STATE BEHAVIORS
+    // STATE SYSTEM BEHAVIORS
     // ==========================================
     if (this.state === "IDLE") {
       this.isWalking = false;
       this.isEating = false;
       this.isScratching = false;
 
+      // Stop any active synth sounds
       if (window.dinoAudio) {
         window.dinoAudio.stopWalking();
         window.dinoAudio.stopChewing();
         window.dinoAudio.stopScratching();
       }
 
+      // Reset positions to origin
       wrapper.position.set(0, 0, 0);
       wrapper.rotation.set(0, 0, 0);
       model.position.set(0, 0, 0);
       model.rotation.set(0, 0, 0);
 
-      // If the dino card itself is not tracked anymore and we are idle, hide the dino
+      // Hide dinosaur completely if cards are lost and we are sitting idle
       if (!this.dinoCardTracked) {
         this.dinoVisible = false;
         this.el.setAttribute("visible", false);
@@ -303,10 +392,12 @@ AFRAME.registerComponent('dino-behavior', {
     } 
     
     else if (this.state === "WALK_TO_MEAT") {
+      // Find where the Meat card is in physical 3D space
       const meatWorldPos = new THREE.Vector3();
       if (window.isMeatSimulated) {
         const dinoWorldPos = new THREE.Vector3();
         this.el.object3D.getWorldPosition(dinoWorldPos);
+        // Simulate meat 25cm to the right of the dinosaur target
         meatWorldPos.copy(dinoWorldPos).add(new THREE.Vector3(0.25, 0, -0.05));
       } else {
         if (this.meatTarget) {
@@ -316,23 +407,35 @@ AFRAME.registerComponent('dino-behavior', {
         }
       }
 
+      // Bridging World Coordinates to Local Coordinates:
+      // MindAR places targets at separate points in global space. To make the dinosaur walk
+      // from its origin card, we read the meat's global coordinates and convert them into 
+      // coordinates relative to the dinosaur using `worldToLocal()`.
       const currentWorldPos = new THREE.Vector3();
       wrapper.getWorldPosition(currentWorldPos);
       const distance = currentWorldPos.distanceTo(meatWorldPos);
       const localTargetPos = this.el.object3D.worldToLocal(meatWorldPos.clone());
-      localTargetPos.y = 0;
+      localTargetPos.y = 0; // Flat movement plane (ignore height)
 
+      // Guard check against NaN calculations
       if (isNaN(distance) || isNaN(localTargetPos.x) || isNaN(localTargetPos.z)) {
         return;
       }
 
+      // Proximity Glow effect: Lerps ambient light color red as dino gets close
       if (distance < 0.6) {
         const t = Math.max(0, 1 - (distance / 0.6));
         targetLightColor.lerp(new THREE.Color("#f43f5e"), t);
         targetIntensity = 1.2 + (t * 0.4);
       }
 
-      const eatThreshold = 0.35;
+      // =======================================================================
+      // 💡 MAY - ADJUST THIS: MEAT ARRIVAL THRESHOLD
+      // 0.35 represents 35 centimeters. If the dinosaur gets within this distance
+      // to the meat, it switches from walking to the eating animation.
+      // Increase this if you want it to stop farther away, or decrease to make it walk closer.
+      // =======================================================================
+      const eatThreshold = 0.35; 
 
       if (distance > eatThreshold) {
         if (this.isEating) {
@@ -340,16 +443,25 @@ AFRAME.registerComponent('dino-behavior', {
           if (window.dinoAudio) window.dinoAudio.stopChewing();
         }
 
+        // 1. ROTATION CALCULATION:
+        // Use Math.atan2 to calculate rotation heading angle. Smoothly rotate wrapper
+        // towards target using lerping (y += diff * 0.1) to avoid sudden turns.
         const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
         let diff = angle - wrapper.rotation.y;
         while (diff < -Math.PI) diff += Math.PI * 2;
         while (diff > Math.PI) diff -= Math.PI * 2;
         wrapper.rotation.y += diff * 0.1;
 
+        // =====================================================================
+        // 💡 MAY - ADJUST THIS: WALK SPEED (MEAT PATH)
+        // 0.72 scales the speed. Try changing this to 1.5 for a running dinosaur,
+        // or to 0.3 for a slow-crawling dinosaur!
+        // =====================================================================
         const dir = new THREE.Vector3().subVectors(localTargetPos, wrapper.position).normalize();
         const walkSpeed = 0.72 * (timeDelta / 1000);
         wrapper.position.addScaledVector(dir, walkSpeed);
 
+        // 3. ANIMATION: Play walk clip
         if (!this.isWalking) {
           this.isWalking = true;
           this.dinoModel.setAttribute('animation-mixer', {
@@ -360,10 +472,11 @@ AFRAME.registerComponent('dino-behavior', {
           if (window.dinoAudio) window.dinoAudio.startWalking();
         }
 
+        // Apply a gentle side-to-side wobble animation via code to simulate physical weight
         model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
         model.rotation.z = Math.sin(time * 0.006) * 0.05;
       } else {
-        // Arrived at meat target: transition to EAT state
+        // Dino arrived at meat: transition to EAT state
         this.state = "EAT";
         this.eatStartTime = time;
         this.updateHUD();
@@ -377,8 +490,9 @@ AFRAME.registerComponent('dino-behavior', {
           loop: 'repeat',
           crossFadeDuration: 0.3
         });
-        if (window.dinoAudio) window.dinoAudio.startChewing();
+        if (window.dinoAudio) window.dinoAudio.startChewing(); // Play crunch loop
 
+        // Visual animation: scale down the meat 3D model, simulating it being eaten
         const meatModel = document.querySelector("#meat-model-entity");
         const meatFallback = document.querySelector("#meat-fallback");
         if (meatModel) {
@@ -388,7 +502,7 @@ AFRAME.registerComponent('dino-behavior', {
           meatFallback.setAttribute("animation", "property: scale; to: 0 0 0; dur: 2000; easing: easeOutQuad");
         }
 
-        // Face the meat once
+        // Freeze face rotation target heading (prevents camera jitter shaking)
         const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
         wrapper.rotation.y = angle;
 
@@ -398,30 +512,36 @@ AFRAME.registerComponent('dino-behavior', {
     } 
     
     else if (this.state === "EAT") {
-      // If 3 seconds pass, finish eating and return home
-      if (time - this.eatStartTime > 3000) {
+      // =======================================================================
+      // 💡 MAY - ADJUST THIS: EATING DURATION
+      // 3000 represents 3 seconds (3000 milliseconds).
+      // Change this to 5000 if you want the dinosaur to chew for 5 seconds before returning home!
+      // =======================================================================
+      const chewTimeLimitMs = 3000;
+      if (time - this.eatStartTime > chewTimeLimitMs) {
         this.isEating = false;
         if (window.dinoAudio) window.dinoAudio.stopChewing();
 
+        // Mark consumed so it doesn't double-trigger walk immediately
         this.meatVisible = false;
         this.lastMeatSeenTime = -999999;
         window.isMeatSimulated = false;
-        this.meatConsumed = true; // Mark as consumed so dino goes home and stays there
+        this.meatConsumed = true; // Set flag
         this.updateHUD();
 
         this.state = "WALK_HOME";
         this.updateHUD();
       } else {
-        // Enjoy eating, stay completely still
+        // Keep still and shine bright pink light on eating dino
         model.position.y = 0;
         model.rotation.z = 0;
-
         targetLightColor.lerp(new THREE.Color("#f43f5e"), 1.0);
         targetIntensity = 1.6;
       }
     } 
     
     else if (this.state === "WALK_TO_TREE") {
+      // Find where the Tree card is in physical space
       const treeWorldPos = new THREE.Vector3();
       this.treeTarget.object3D.getWorldPosition(treeWorldPos);
 
@@ -435,21 +555,32 @@ AFRAME.registerComponent('dino-behavior', {
         return;
       }
 
+      // Proximity Glow: Lerps ambient light color green as dino gets close to tree
       if (distance < 0.6) {
         const t = Math.max(0, 1 - (distance / 0.6));
         targetLightColor.lerp(new THREE.Color("#10b981"), t);
         targetIntensity = 1.2 + (t * 0.3);
       }
 
+      // =======================================================================
+      // 💡 MAY - ADJUST THIS: TREE ARRIVAL THRESHOLD
+      // 0.35 represents 35 centimeters. Dinosaur stops walking when it gets here.
+      // =======================================================================
       const treeThreshold = 0.35;
 
       if (distance > treeThreshold) {
+        // Rotate and walk forward
         const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
         let diff = angle - wrapper.rotation.y;
         while (diff < -Math.PI) diff += Math.PI * 2;
         while (diff > Math.PI) diff -= Math.PI * 2;
         wrapper.rotation.y += diff * 0.1;
 
+        // =====================================================================
+        // 💡 MAY - ADJUST THIS: WALK SPEED (TREE PATH)
+        // 0.72 scales the speed. Make sure this matches walk speed on other paths
+        // unless you want the dino to speed up/slow down on its way to the tree!
+        // =====================================================================
         const dir = new THREE.Vector3().subVectors(localTargetPos, wrapper.position).normalize();
         const walkSpeed = 0.72 * (timeDelta / 1000);
         wrapper.position.addScaledVector(dir, walkSpeed);
@@ -464,19 +595,21 @@ AFRAME.registerComponent('dino-behavior', {
           if (window.dinoAudio) window.dinoAudio.startWalking();
         }
 
+        // Wobble walking motion
         model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
         model.rotation.z = Math.sin(time * 0.006) * 0.05;
       } else {
-        // Arrived at tree target: face once, clear tracking, and head back home
+        // Arrived at tree: head home immediately (dino doesn't do anything at the tree)
         this.isWalking = false;
         if (window.dinoAudio) window.dinoAudio.stopWalking();
 
+        // Lock face angle
         const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
         wrapper.rotation.y = angle;
 
         this.treeVisible = false;
         this.lastTreeSeenTime = -999999;
-        this.treeInspected = true; // Mark tree as inspected so dino goes home and stays there
+        this.treeInspected = true; // Mark as inspected
         this.updateHUD();
 
         model.position.y = 0;
@@ -491,7 +624,7 @@ AFRAME.registerComponent('dino-behavior', {
       const distToHome = wrapper.position.distanceTo(this.homePos);
 
       if (distToHome > 0.01) {
-        // Reset meat scale if it had shrunk
+        // Reset meat models back to scale (1 1 1) so it shows up for next scan
         const meatModel = document.querySelector("#meat-model-entity");
         const meatFallback = document.querySelector("#meat-fallback");
         if (meatModel) {
@@ -503,12 +636,14 @@ AFRAME.registerComponent('dino-behavior', {
           meatFallback.setAttribute("scale", "1 1 1");
         }
 
+        // Smoothly rotate heading towards home coordinate (0, 0, 0)
         const angle = Math.atan2(0 - wrapper.position.x, 0 - wrapper.position.z);
         let diff = angle - wrapper.rotation.y;
         while (diff < -Math.PI) diff += Math.PI * 2;
         while (diff > Math.PI) diff -= Math.PI * 2;
         wrapper.rotation.y += diff * 0.1;
 
+        // Walk home
         const dir = new THREE.Vector3().subVectors(this.homePos, wrapper.position).normalize();
         const walkSpeed = 0.72 * (timeDelta / 1000);
         wrapper.position.addScaledVector(dir, walkSpeed);
@@ -526,18 +661,18 @@ AFRAME.registerComponent('dino-behavior', {
         model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
         model.rotation.z = Math.sin(time * 0.006) * 0.05;
       } else {
-        // Arrived back home: transition to IDLE
+        // Arrived home: go to IDLE state
         this.state = "IDLE";
         this.updateHUD();
       }
     }
 
-    // Apply Dynamic Proximity Lights smoothly
+    // Apply Lerped Lighting changes smoothly to ambientLight entity
     if (this.ambientLight) {
       const lightComponent = this.ambientLight.getAttribute("light");
       if (lightComponent) {
         const currentColor = new THREE.Color(lightComponent.color || "#ffffff");
-        currentColor.lerp(targetLightColor, 0.08);
+        currentColor.lerp(targetLightColor, 0.08); // Transition color by 8% per frame
         
         const currentIntensity = parseFloat(lightComponent.intensity || 1.2);
         const nextIntensity = currentIntensity + (targetIntensity - currentIntensity) * 0.08;
@@ -551,12 +686,16 @@ AFRAME.registerComponent('dino-behavior', {
     }
   },
 
+  /*
+    resetDino() forces the state back to IDLE, resets positions/rotations, and resets scales.
+  */
   resetDino: function () {
     this.isWalking = false;
     this.isEating = false;
     this.isScratching = false;
     this.state = "IDLE";
 
+    // Silence audio
     if (window.dinoAudio) {
       window.dinoAudio.stopWalking();
       window.dinoAudio.stopChewing();
@@ -567,9 +706,9 @@ AFRAME.registerComponent('dino-behavior', {
     const wrapper = this.dinoWrapper.object3D;
     const model = this.dinoModel.object3D;
     
+    // Reset spatial matrices
     wrapper.position.set(0, 0, 0);
     wrapper.rotation.set(0, 0, 0);
-    
     model.position.set(0, 0, 0);
     model.rotation.set(0, 0, 0);
 
@@ -577,13 +716,14 @@ AFRAME.registerComponent('dino-behavior', {
       this.treeGltf.object3D.rotation.z = 0;
     }
 
+    // Play default idle animation
     this.dinoModel.setAttribute('animation-mixer', {
       clip: this.clipIdle,
       loop: 'repeat',
       crossDuration: 0.3
     });
 
-    // Reset meat elements
+    // Reset scales of food items
     const meatModel = document.querySelector("#meat-model-entity");
     const meatFallback = document.querySelector("#meat-fallback");
     if (meatModel) {
@@ -597,24 +737,36 @@ AFRAME.registerComponent('dino-behavior', {
   }
 });
 
+
 // =========================================================================
 // 3. REGISTER THE TREE COLOR PATCH COMPONENT
 // =========================================================================
+/*
+  May, sometimes 3D models downloaded from the web render with flat black/white materials
+  because their texture paths get broken inside A-Frame's standard shaders.
+  This component patches the tree model meshes dynamically once loaded.
+  It traverses the 3D nodes:
+  - If a node name contains 'leaf' or 'leaves', it overrides its color to vibrant green.
+  - If a node name contains 'bark', 'trunk', 'wood', etc., it overrides it to wood brown.
+*/
 AFRAME.registerComponent('tree-color-patch', {
   init: function () {
     this.el.addEventListener('model-loaded', (e) => {
       const model = e.detail.model;
+      
+      // Traverse all nodes in the glTF hierarchy
       model.traverse((node) => {
         if (node.isMesh) {
           const name = node.name.toLowerCase();
           if (node.material) {
-            node.material = node.material.clone(); // Clone material to avoid sharing
+            node.material = node.material.clone(); // Clone material to avoid sharing with other objects
+            
             if (name.includes('leaf') || name.includes('leaves')) {
-              node.material.color.set('#22c55e'); // Vibrant Green
+              node.material.color.set('#22c55e'); // Green leaves
               node.material.roughness = 0.6;
               node.material.metalness = 0.1;
             } else if (name.includes('bark') || name.includes('trunk') || name.includes('stem') || name.includes('root') || name.includes('wood')) {
-              node.material.color.set('#78350f'); // Wood Brown
+              node.material.color.set('#78350f'); // Brown trunk
               node.material.roughness = 0.9;
               node.material.metalness = 0.05;
             }
@@ -625,12 +777,18 @@ AFRAME.registerComponent('tree-color-patch', {
   }
 });
 
+
 // =========================================================================
 // 4. REGISTER WEB AUDIO API SYNTHESIZER
 // =========================================================================
+/*
+  Rather than downloading heavy .mp3 sound files over slow mobile networks,
+  we use the browser's native Web Audio API to "synthesize" sounds (roar, chewing) 
+  from scratch using raw mathematical waveforms! This keeps the project extremely fast.
+*/
 class ARAudioSynthesizer {
   constructor() {
-    this.ctx = null;
+    this.ctx = null;          // AudioContext node
     this.walkInterval = null;
     this.isWalking = false;
     this.chewInterval = null;
@@ -639,6 +797,10 @@ class ARAudioSynthesizer {
     this.isScratching = false;
   }
 
+  /*
+    init() instantiates the audio context.
+    Browser security requires this to run inside a user gesture (like a button click).
+  */
   init() {
     if (this.ctx) return;
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -653,6 +815,12 @@ class ARAudioSynthesizer {
     }
   }
 
+  /*
+    playRoar() generates a growl sound using:
+    - 2 low-pitch oscillators (sawtooth/triangle waveforms) sliding down in frequency.
+    - A white noise buffer node representing growl gravel textured air.
+    - Bandpass and lowpass filters shaping the sound into a deep guttural creature roar.
+  */
   playRoar() {
     this.init();
     this.resume();
@@ -660,24 +828,24 @@ class ARAudioSynthesizer {
 
     const now = this.ctx.currentTime;
     
-    // 1. Create nodes
+    // Create audio nodes
     const osc1 = this.ctx.createOscillator();
     const osc2 = this.ctx.createOscillator();
     const noiseNode = this.ctx.createBufferSource();
     const lowpass = this.ctx.createBiquadFilter();
     const mainGain = this.ctx.createGain();
 
-    // 2. Configure noise (textured growl)
-    const bufferSize = this.ctx.sampleRate * 2.0; // 2 seconds of noise
+    // Generate 2 seconds of random white noise values
+    const bufferSize = this.ctx.sampleRate * 2.0; 
     const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
     const data = buffer.getChannelData(0);
     for (let i = 0; i < bufferSize; i++) {
-      data[i] = Math.random() * 2 - 1;
+      data[i] = Math.random() * 2 - 1; // Random float values between -1 and 1
     }
     noiseNode.buffer = buffer;
     noiseNode.loop = true;
 
-    // Noise filter (guttural gravel)
+    // Set up noise filter to highlight growling frequencies
     const noiseFilter = this.ctx.createBiquadFilter();
     noiseFilter.type = 'bandpass';
     noiseFilter.frequency.setValueAtTime(100, now);
@@ -687,10 +855,10 @@ class ARAudioSynthesizer {
     noiseGain.gain.setValueAtTime(0.5, now);
     noiseGain.gain.exponentialRampToValueAtTime(0.01, now + 1.8);
 
-    // 3. Configure low pitch oscillators
+    // Set up deep sliding oscillators (sawtooth and triangle)
     osc1.type = 'sawtooth';
-    osc1.frequency.setValueAtTime(80, now);
-    osc1.frequency.exponentialRampToValueAtTime(35, now + 1.5);
+    osc1.frequency.setValueAtTime(80, now); // Starts at 80Hz
+    osc1.frequency.exponentialRampToValueAtTime(35, now + 1.5); // Slides down to 35Hz
 
     osc2.type = 'triangle';
     osc2.frequency.setValueAtTime(85, now);
@@ -700,13 +868,13 @@ class ARAudioSynthesizer {
     oscGain.gain.setValueAtTime(0.8, now);
     oscGain.gain.exponentialRampToValueAtTime(0.01, now + 1.8);
 
-    // 4. Lowpass Filter
+    // Lowpass filter to cut high squeaky frequencies
     lowpass.type = 'lowpass';
     lowpass.frequency.setValueAtTime(300, now);
     lowpass.frequency.exponentialRampToValueAtTime(90, now + 1.8);
     lowpass.Q.setValueAtTime(6.0, now);
 
-    // 5. Connect Everything
+    // Connect nodes: Oscillators & Noise -> Filters -> Main Volume -> Speakers
     osc1.connect(oscGain);
     osc2.connect(oscGain);
     
@@ -719,30 +887,33 @@ class ARAudioSynthesizer {
     lowpass.connect(mainGain);
     mainGain.connect(this.ctx.destination);
 
-    // 6. Main Gain volume envelope
+    // Main gain volume envelope ramp
     mainGain.gain.setValueAtTime(0, now);
     mainGain.gain.linearRampToValueAtTime(0.9, now + 0.1);
     mainGain.gain.exponentialRampToValueAtTime(0.4, now + 0.8);
     mainGain.gain.exponentialRampToValueAtTime(0.001, now + 1.8);
 
-    // 7. Start & Stop
+    // Start nodes
     osc1.start(now);
     osc2.start(now);
     noiseNode.start(now);
 
+    // Stop nodes
     osc1.stop(now + 1.8);
     osc2.stop(now + 1.8);
     noiseNode.stop(now + 1.8);
   }
 
-  startWalking() {
-    // Walking dinosaur steps sound removed
-  }
+  // Walk sounds have been silenced per user requests
+  startWalking() {}
+  stopWalking() {}
 
-  stopWalking() {
-    // Walking dinosaur steps sound removed
-  }
-
+  /*
+    startChewing() plays repeated chewing crunch sounds using:
+    - High-frequency white noise bursts representing teeth snapping.
+    - Bandpass filter (around 600Hz) to represent crunch textures.
+    - Fast exponential decays mimicking bite actions.
+  */
   startChewing() {
     this.init();
     this.resume();
@@ -752,8 +923,7 @@ class ARAudioSynthesizer {
     const playChew = () => {
       const now = this.ctx.currentTime;
       
-      // Synthetic bite/crunch: bandpass filtered noise bursts
-      const bufferSize = this.ctx.sampleRate * 0.15; // 0.15 seconds
+      const bufferSize = this.ctx.sampleRate * 0.15; // 0.15s short crunch
       const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
       const data = buffer.getChannelData(0);
       for (let i = 0; i < bufferSize; i++) {
@@ -781,7 +951,7 @@ class ARAudioSynthesizer {
     };
 
     playChew();
-    this.chewInterval = setInterval(playChew, 350); // Fast chewing sounds
+    this.chewInterval = setInterval(playChew, 350); // Crunch sound loops every 350ms
   }
 
   stopChewing() {
@@ -792,6 +962,9 @@ class ARAudioSynthesizer {
     this.isChewing = false;
   }
 
+  /*
+    startScratching() generates rustling noise (leaves) with a higher frequency filter.
+  */
   startScratching() {
     this.init();
     this.resume();
@@ -801,8 +974,7 @@ class ARAudioSynthesizer {
     const playRustle = () => {
       const now = this.ctx.currentTime;
       
-      // Sound of leaves rustling and branch scraping (white noise + higher frequency BP filter)
-      const bufferSize = this.ctx.sampleRate * 0.25; // 0.25 seconds
+      const bufferSize = this.ctx.sampleRate * 0.25; 
       const buffer = this.ctx.createBuffer(1, bufferSize, this.ctx.sampleRate);
       const data = buffer.getChannelData(0);
       for (let i = 0; i < bufferSize; i++) {
@@ -814,11 +986,10 @@ class ARAudioSynthesizer {
       
       const filter = this.ctx.createBiquadFilter();
       filter.type = 'bandpass';
-      filter.frequency.setValueAtTime(2200, now);
+      filter.frequency.setValueAtTime(2200, now); // Higher pitch for dry leaves (2.2kHz)
       filter.Q.setValueAtTime(1.0, now);
       
       const gain = this.ctx.createGain();
-      // Modulate gain slightly for scratching texture
       gain.gain.setValueAtTime(0.2, now);
       gain.gain.linearRampToValueAtTime(0.3, now + 0.05);
       gain.gain.exponentialRampToValueAtTime(0.001, now + 0.24);
@@ -832,7 +1003,7 @@ class ARAudioSynthesizer {
     };
 
     playRustle();
-    this.scratchInterval = setInterval(playRustle, 500); // Scratch every 500ms
+    this.scratchInterval = setInterval(playRustle, 500); 
   }
 
   stopScratching() {
@@ -847,9 +1018,13 @@ class ARAudioSynthesizer {
 // Instantiated globally so entities and UI can trigger it
 window.dinoAudio = new ARAudioSynthesizer();
 
+
 // =========================================================================
-// 5. DOCUMENT CONTROLLER EVENTS
+// 5. DOCUMENT CONTROLLER EVENTS & CAMERA TRIGGER SYSTEM
 // =========================================================================
+/*
+  This controls UI interaction clicks and starts A-Frame's rendering loops.
+*/
 function initApp() {
   const startScreen = document.getElementById("start-screen");
   const startButton = document.getElementById("start-button");
@@ -858,25 +1033,30 @@ function initApp() {
   const statusToast = document.getElementById("status-toast");
   const arScene = document.getElementById("ar-scene");
 
+  // If critical components aren't in the DOM yet, return false to let the script retry later
   if (!arScene || !startButton) {
     console.warn("[ARApp] Required DOM elements not found. Will retry on DOMContentLoaded.");
     return false;
   }
 
+  // Triggered when clicking "Start Camera"
   const startARScanner = () => {
-    // Initialize Web Audio context from user gesture
+    // Initialize/resume Web Audio API context from user tap gesture
     if (window.dinoAudio) {
       window.dinoAudio.init();
       window.dinoAudio.resume();
     }
 
-    if (startScreen) startScreen.style.display = "none";
-    if (scanBox) scanBox.style.display = "block";
-    if (statusToast) statusToast.style.display = "block";
+    // Adjust interface layer displays
+    if (startScreen) startScreen.style.display = "none"; // Hide startup screen
+    if (scanBox) scanBox.style.display = "block";        // Show dashed scan frame
+    if (statusToast) statusToast.style.display = "block"; // Show alert toast
     if (headerStatus) headerStatus.textContent = "Scanning for targets...";
 
+    // Cache autostart state so reload bypasses clicking start again
     sessionStorage.setItem("ar_3d_autostart", "true");
 
+    // Start MindAR camera streams
     const arSystem = arScene.systems ? arScene.systems["mindar-image-system"] : null;
     if (arSystem) {
       arSystem.start();
@@ -890,15 +1070,17 @@ function initApp() {
     }
   };
 
+  // If A-Frame has already loaded, run autostart checks. Otherwise, register event listener
   if (arScene.hasLoaded) {
     runAutostart();
   } else {
     arScene.addEventListener("loaded", runAutostart);
   }
 
+  // Bind click listener
   startButton.addEventListener("click", startARScanner);
 
-  // Visibility changes
+  // Monitor tab changes: if user leaves tab and returns, make sure camera restarts correctly
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "visible") {
       if (startScreen && startScreen.style.display === "none") {
@@ -910,7 +1092,7 @@ function initApp() {
     }
   });
 
-  // MindAR camera/engine start error event listener
+  // Watch for camera permission blockages or secure context failures (HTTP vs HTTPS)
   arScene.addEventListener("arError", (event) => {
     console.error("MindAR start error:", event);
     if (headerStatus) {
@@ -921,9 +1103,13 @@ function initApp() {
     alert("Camera Error: Access was blocked or failed.\n\nMake sure:\n1. You are visiting via HTTPS (not HTTP)\n2. Camera permissions are allowed.");
   });
 
-  return true;
+  return true; // Successfully initialized
 }
 
+// Ready State Wrapper:
+// If the DOM is still loading, bind to DOMContentLoaded. If it's already parsed 
+// (e.g., loaded from cache), run initApp immediately. If elements aren't ready yet,
+// registers event listener as a fallback.
 if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", () => {
     initApp();

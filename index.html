@@ -1,54 +1,103 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
+  <!-- Standard HTML Metadata declaring character set and responsive viewport for mobile screens -->
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Student WebAR App: Interactive Dinosaur Tracking</title>
   
+  <!-- 
+    ===========================================================================
+    DIAGNOSTIC ERROR REPORTING SYSTEM
+    ===========================================================================
+    This script listens globally for any JavaScript runtime errors or unhandled promises.
+    If anything crashes (e.g., library failed to load, missing variable, typo), 
+    it immediately alerts the user with the filename, line, and details so they don't
+    have to dig through the browser's hidden developer console.
+  -->
   <script>
     window.addEventListener('error', function(event) {
       const errorMsg = event.message + '\nat ' + event.filename + ':' + event.lineno + ':' + event.colno;
-      alert('JavaScript Error:\n\n' + errorMsg);
+      alert('JavaScript Error Detected:\n\n' + errorMsg);
     });
     window.addEventListener('unhandledrejection', function(event) {
-      alert('Unhandled Promise Rejection:\n\n' + event.reason);
+      alert('Unhandled Promise Rejection Detected:\n\n' + event.reason);
     });
   </script>
 
-  <!-- Load A-Frame, MindAR, and A-Frame Extras (for glTF animations) -->
+  <!-- 
+    ===========================================================================
+    WEB-AR & 3D RENDERING LIBRARY SCRIPT IMPORTS
+    ===========================================================================
+    1. aframe.min.js: Standard library to render 3D scenes inside a web page.
+    2. mindar-image-aframe.prod.js: Integrates Computer Vision tracking (MindAR) with A-Frame.
+    3. aframe-extras.min.js: Auxiliary plugin that supports playing skeletal animations from glTF files.
+    4. index.js: Our custom script registering interactive components, audio synth, and UI controls.
+  -->
   <script src="https://aframe.io/releases/1.4.2/aframe.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-aframe.prod.js"></script>
   <script src="https://cdn.jsdelivr.net/gh/donmccurdy/aframe-extras@v7.2.0/dist/aframe-extras.min.js"></script>
   <script src="index.js"></script>
 
+  <!-- Link to our clean stylesheet file containing CSS rules for the UI overlays -->
   <link rel="stylesheet" href="index.css">
 </head>
 <body>
 
-  <!-- Startup Screen Overlay -->
+  <!-- 
+    ===========================================================================
+    STARTUP SCREEN OVERLAY (UI LAYER)
+    ===========================================================================
+    This screen displays initially when the page loads. It guides the user to grant 
+    camera permissions and provides a preview of the AR target cards.
+  -->
   <div id="start-screen">
     <div class="start-container">
+      <!-- Target image thumbnail so users know what visual to scan -->
       <img src="assets/dino_card.png" alt="Dino Card Preview" class="start-logo" style="width: 120px; height: 120px; border-radius: 12px; margin-bottom: 16px; border: 2px solid #10b981;">
       <h1>Dinosaur WebAR Tracker</h1>
       <p>Tap the button below, allow camera permissions, and point your phone camera at the Dinosaur card image to spawn the 3D dinosaur.</p>
+      <!-- User click on this button initializes the Web Audio API context and fires the AR camera -->
       <button class="start-btn" id="start-button">Start Camera</button>
     </div>
   </div>
 
-  <!-- Header HUD status bar -->
+  <!-- 
+    ===========================================================================
+    HEADS-UP-DISPLAY (HUD) STATUS BAR
+    ===========================================================================
+    Positioned statically at the top of the screen. Its text content and colors are 
+    actively updated by our script component (updateHUD) to report dinosaur states.
+  -->
   <div class="header">
     <h2 id="header-status">WebAR Student Sandbox</h2>
   </div>
 
-  <!-- Dashed guideline frame in the center -->
+  <!-- 
+    ===========================================================================
+    SCANNING OVERLAY GUIDELINE FRAME
+    ===========================================================================
+    A dashed scanner box centered in the middle of the phone screen.
+    Changes border style to solid green when any of the targets are tracked in view.
+  -->
   <div id="scan-box"></div>
 
-  <!-- Bottom toast capsule instructions -->
+  <!-- Bottom toast capsule providing instruction alerts to the user -->
   <div id="status-toast">Align card inside the frame</div>
 
 
-
-  <!-- A-FRAME Scene Configuration -->
+  <!-- 
+    ===========================================================================
+    A-FRAME 3D SCENE GRAPH
+    ===========================================================================
+    The <a-scene> container coordinates everything in our WebAR viewport.
+    Attributes explained:
+    - mindar-image: Binds the tracking descriptor (targets_v5.mind) compiling up to 3 cards.
+                    autoStart: false prevents the camera from launching before the user clicks start.
+    - embedded: Integrates A-Frame nicely inside our CSS viewport boundaries.
+    - color-space / renderer: Enables sRGB gamma-corrected physically correct color rendering.
+    - shadow: Enables soft depth shadow maps (pcfsoft).
+  -->
   <a-scene 
     id="ar-scene"
     mindar-image="imageTargetSrc: assets/targets_v5.mind; maxTrack: 3; autoStart: false; filterMinCF:0.0001; filterBeta:0.001; uiScanning: no;" 
@@ -59,30 +108,60 @@
     device-orientation-permission-ui="enabled: false"
     shadow="type: pcfsoft">
     
+    <!-- 
+      ===========================================================================
+      ASSET MANAGEMENT PRELOADER
+      ===========================================================================
+      A-Frame downloads and caches 3D model assets here before loading them into 
+      the scene graph. This prevents visual lag and rendering glitches during gameplay.
+    -->
     <a-assets timeout="15000">
-      <!-- Dinosaur Model (Giganotosaurus) -->
+      <!-- dino.glb: Skeletal animated 3D dinosaur mesh -->
       <a-asset-item id="dinoModel" src="assets/dino.glb"></a-asset-item>
       
-      <!-- Placeholder Empty Refs for Custom Models -->
+      <!-- tree_animate.glb: Tree mesh supporting morph-target growth animations -->
       <a-asset-item id="treeModel" src="assets/tree_animate.glb"></a-asset-item>
+      
+      <!-- meat.glb: Food meat mesh -->
       <a-asset-item id="meatModel" src="assets/meat.glb"></a-asset-item>
     </a-assets>
 
+    <!-- 
+      A static orthographic viewport camera looking at the scene.
+      Since MindAR manages relative transformation coordinates dynamically,
+      look-controls are turned off so user swipes don't disconnect the camera matrix.
+    -->
     <a-camera position="0 0 0" look-controls="enabled: false"></a-camera>
 
-    <!-- Scene Lighting -->
+    <!-- 
+      ===========================================================================
+      LIGHTING ABSTRACTION SYSTEM
+      ===========================================================================
+      - ambient-light: Sets general global light color and base brightness. Its intensity 
+                       and colors are smoothly animated by the script as targets approach.
+      - directional-light: Casts simulated key sunlight to create detailed soft depth shadows.
+    -->
     <a-entity id="ambient-light" light="type: ambient; color: #ffffff; intensity: 1.2"></a-entity>
     <a-entity id="main-light" light="type: directional; color: #ffffff; intensity: 0.8; castShadow: true; shadowMapHeight: 2048; shadowMapWidth: 2048; shadowCameraLeft: -1; shadowCameraRight: 1; shadowCameraTop: 1; shadowCameraBottom: -1; shadowCameraNear: 0.1; shadowCameraFar: 10" position="-0.5 1 1"></a-entity>
 
-    <!-- Target Index 2: Dinosaur Card -->
+    <!-- 
+      ===========================================================================
+      TARGET CARD 2: DINOSAUR CARD
+      ===========================================================================
+      mindar-image-target maps this container directly to card index 2 in our .mind package.
+      We attach our custom 'dino-behavior' component here.
+    -->
     <a-entity id="dino-target" mindar-image-target="targetIndex: 2" dino-behavior>
+      <!-- 
+        Dinosaur Model Wrapper: Used as the coordinate frame for dinosaur position displacements.
+        We displace this wrapper to walk to food/tree targets while keeping the dino entity itself centered.
+      -->
       <a-entity id="dino-model-wrapper" position="0 0 0" rotation="0 0 0">
         <!-- 
-          Aligning Giganotosaurus Carolinii:
           - rotation: rotates model 90 degrees around X to stand upright on card surface. 
-            Change Y-rotation (middle number) to adjust facing direction (e.g. 90 180 0).
-          - scale: scales model. Change to make the dinosaur larger/smaller.
-          - position: Z value moves it slightly off the card plane to avoid clipping.
+          - scale: matches model relative unit sizes.
+          - position: shifts mesh Z-axis offset slightly to prevent card clipping.
+          - shadow: activates shadow casting and receiver calculations.
         -->
         <a-gltf-model 
           id="dino-model" 
@@ -93,14 +172,29 @@
           shadow="cast: true; receive: true">
         </a-gltf-model>
       </a-entity>
+      <!-- Shadow receiver plane to display the soft shadows generated by the dinosaur entity -->
       <a-plane rotation="-90 0 0" width="2" height="2" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
     </a-entity>
 
-    <!-- Target Index 1: Tree Card -->
+    <!-- 
+      ===========================================================================
+      TARGET CARD 1: TREE CARD
+      ===========================================================================
+      mindar-image-target maps this container to card index 1.
+    -->
     <a-entity id="tree-target" mindar-image-target="targetIndex: 1">
       <a-entity id="tree-model-entity" position="0 0 0">
+        <!-- 
+          We attach 'tree-color-patch' here to overwrite node material maps with natural colors on load.
+          animation-mixer triggers the growth loop animation clip (MorphBake).
+        -->
         <a-gltf-model src="#treeModel" scale="0.005 0.005 0.005" rotation="90 0 0" position="0.41 0 0.05" animation-mixer="clip: MorphBake; loop: repeat" tree-color-patch shadow="cast: true; receive: true"></a-gltf-model>
         <a-plane rotation="-90 0 0" width="1" height="1" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
+        <!-- 
+          Geometrical Fallback Model:
+          If the glTF resource fails to download, this backup representation (cone + cylinder) 
+          is unhidden and rendered by index.js to prevent empty visual scenes.
+        -->
         <a-entity id="tree-fallback" position="0 0 0" rotation="90 0 0" visible="false">
           <a-cone color="#10b981" height="0.35" radius-bottom="0.1" position="0 0.175 0" material="roughness: 0.3; metalness: 0.1"></a-cone>
           <a-cylinder color="#78350f" height="0.1" radius="0.02" position="0 0.05 0"></a-cylinder>
@@ -108,11 +202,17 @@
       </a-entity>
     </a-entity>
 
-    <!-- Target Index 0: Meat Card -->
+    <!-- 
+      ===========================================================================
+      TARGET CARD 0: MEAT CARD
+      ===========================================================================
+      mindar-image-target maps this container to card index 0.
+    -->
     <a-entity id="meat-target" mindar-image-target="targetIndex: 0">
       <a-entity id="meat-model-entity" position="0 0 0">
         <a-gltf-model src="#meatModel" scale="0.02 0.02 0.02" rotation="90 0 0" position="0 0 0.05" shadow="cast: true; receive: true"></a-gltf-model>
         <a-plane rotation="-90 0 0" width="1" height="1" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
+        <!-- Geometrical Fallback Model: sphere + cylinder represent meat food if asset loading fails -->
         <a-entity id="meat-fallback" position="0 0 0" rotation="90 0 0" visible="false">
           <a-sphere color="#f43f5e" radius="0.04" position="0 0.04 0" scale="1.4 0.9 0.9" material="roughness: 0.4; metalness: 0.2; emissive: #881337; emissiveIntensity: 0.2"></a-sphere>
           <a-cylinder color="#ffffff" height="0.06" radius="0.01" rotation="0 0 45" position="-0.03 0.02 0"></a-cylinder>
@@ -120,7 +220,6 @@
       </a-entity>
     </a-entity>
   </a-scene>
-
 
 </body>
 </html>

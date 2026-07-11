@@ -1,16 +1,36 @@
+/* 
+  =============================================================================
+  GLOBAL VIEWPORT STYLING (THE LAYOUT BASE)
+  =============================================================================
+  May, we want the WebAR camera feed to stretch from edge to edge without any white
+  borders, layout shifting, or browser scrollbars. 
+  - margin & padding: 0 overrides default browser padding.
+  - width & height: 100% ensures the container occupies the entire viewport space.
+  - background-color: #0f172a sets a beautiful deep slate/dark theme before the camera launches.
+  - overflow: hidden disables scrollbars so phone swipes don't slide the page around.
+*/
 html, body {
   margin: 0;
   padding: 0;
   width: 100%;
   height: 100%;
-  background-color: #0f172a; /* Sleek dark theme */
+  background-color: #0f172a;
   color: #ffffff;
   font-family: Arial, sans-serif;
   overflow-x: hidden;
   overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
+  -webkit-overflow-scrolling: touch; /* Ensures smooth touch dragging/scrolling on iOS devices */
 }
 
+/* 
+  =============================================================================
+  AR CAMERA VIEWPORT CANVAS
+  =============================================================================
+  This represents the canvas element rendered by A-Frame + MindAR camera stream.
+  - position: absolute locks it in place at (top:0, left:0).
+  - z-index: 1 pushes it to the bottom layer. All our text elements, buttons, and 
+    overlays will have z-index values higher than 1 to sit on top of the camera view.
+*/
 #ar-scene {
   position: absolute;
   top: 0px;
@@ -21,6 +41,16 @@ html, body {
   display: block;
 }
 
+/* 
+  =============================================================================
+  HEADS-UP-DISPLAY (HUD) STATUS HEADER
+  =============================================================================
+  Floating bar at the top of the mobile screen showing the dinosaur's active status.
+  - background-color: rgba(...) uses an alpha value of 0.85 to create a semi-transparent black.
+  - backdrop-filter: blur(8px) produces a sleek premium "glassmorphism" blur effect,
+    letting the camera pixels blur nicely underneath the header.
+  - box-sizing: border-box prevents padding calculations from expanding the 100% width.
+*/
 .header {
   position: absolute;
   top: 0;
@@ -31,7 +61,7 @@ html, body {
   padding: 14px;
   text-align: center;
   box-sizing: border-box;
-  z-index: 10;
+  z-index: 10; /* Sits on top of the AR canvas */
   border-bottom: 1px solid rgba(255, 255, 255, 0.1);
 }
 
@@ -39,16 +69,25 @@ html, body {
   margin: 0;
   font-size: 1.8rem;
   letter-spacing: 1px;
-  transition: color 0.3s ease;
+  transition: color 0.3s ease; /* Smoothly changes the status text color on state transitions */
 }
 
+/* 
+  =============================================================================
+  STARTUP SPLASH SCREEN OVERLAY
+  =============================================================================
+  This layer blocks the entire screen (z-index: 100) until the user taps "Start Camera".
+  - position: fixed locks this container to the viewport grid even if the user resizes.
+  - display: flex arranges child elements vertically (flex-direction: column) 
+    and centers them perfectly on both axes (justify-content and align-items: center).
+*/
 #start-screen {
   position: fixed;
   top: 0;
   left: 0;
   width: 100%;
   height: 100%;
-  background-color: #11263d;
+  background-color: #11263d; /* Dark blue background */
   z-index: 100;
   display: flex;
   flex-direction: column;
@@ -59,6 +98,15 @@ html, body {
   box-sizing: border-box;
 }
 
+/* 
+  =============================================================================
+  STARTUP MESSAGE DIALOG CONTAINER
+  =============================================================================
+  The visual dialog capsule that floats inside the start screen.
+  - max-width: 480px ensures it fits gracefully on both small phones and wide laptops.
+  - border-radius: 16px rounds the corners for a soft premium look.
+  - box-shadow: adds a soft drop shadow offset to make the card feel "elevated".
+*/
 .start-container {
   background-color: rgba(15, 23, 42, 0.95);
   border: 1px solid rgba(255, 255, 255, 0.1);
@@ -72,16 +120,23 @@ html, body {
 .start-container h1 {
   margin-top: 0;
   font-size: 1.7rem;
-  color: #6366f1;
+  color: #6366f1; /* Vibrant Indigo header */
 }
 
 .start-container p {
-  color: #9ca3af;
+  color: #9ca3af; /* Soft slate gray text color */
   font-size: 0.95rem;
   line-height: 1.6;
   margin-bottom: 20px;
 }
 
+/* 
+  =============================================================================
+  START CAMERA LAUNCH BUTTON
+  =============================================================================
+  - cursor: pointer changes the cursor arrow to a hand, showing it is interactive.
+  - transition: smooths out hover transformations over 0.2 seconds.
+*/
 .start-btn {
   background-color: #6366f1;
   color: #ffffff;
@@ -95,11 +150,22 @@ html, body {
   box-shadow: 0 4px 12px rgba(99, 102, 241, 0.4);
 }
 
+/* Hover micro-animation makes the button lift up slightly when hovered */
 .start-btn:hover {
-  background-color: #4f46e5;
-  transform: translateY(-2px);
+  background-color: #4f46e5; /* Darker indigo shift */
+  transform: translateY(-2px); /* Moves button 2 pixels upward */
 }
 
+/* 
+  =============================================================================
+  DASHED SCANNING TARGET FRAME
+  =============================================================================
+  A visual guide frame centered on the screen indicating where users should hold target cards.
+  - top/left: 50% coupled with transform: translate(-50%, -50%) aligns the element
+    perfectly in the dead-center of the parent window.
+  - pointer-events: none is extremely important! It lets touch events click "through" 
+    the dashed box down to A-Frame controls underneath.
+*/
 #scan-box {
   position: absolute;
   top: 50%;
@@ -107,24 +173,32 @@ html, body {
   transform: translate(-50%, -50%);
   width: 260px;
   height: 260px;
-  border: 2px dashed #6366f1;
+  border: 2px dashed #6366f1; /* Dashed Indigo frame */
   border-radius: 20px;
   z-index: 10;
   pointer-events: none;
-  display: none;
+  display: none; /* Initially hidden, made visible when scanner starts */
   transition: border-color 0.3s ease, border-style 0.3s;
 }
 
+/* When a card is successfully tracked, we add the "tracked" class via script to turn the box solid green */
 #scan-box.tracked {
-  border-color: #10b981;
-  border-style: solid;
+  border-color: #10b981; /* Emerald Green */
+  border-style: solid;  /* Solid line */
 }
 
+/* 
+  =============================================================================
+  BOTTOM TOAST POPUP NOTIFICATION
+  =============================================================================
+  Floating text bubble informing users what tracking steps to perform.
+  - white-space: nowrap prevents text wrapping if the status line gets long.
+*/
 #status-toast {
   position: absolute;
   bottom: 24px;
   left: 50%;
-  transform: translateX(-50%);
+  transform: translateX(-50%); /* Centers the toast horizontally */
   background-color: rgba(15, 23, 42, 0.9);
   border: 1px solid rgba(255, 255, 255, 0.1);
   padding: 10px 20px;
@@ -132,7 +206,7 @@ html, body {
   font-size: 0.9rem;
   z-index: 10;
   pointer-events: none;
-  display: none;
+  display: none; /* Initially hidden, visible during tracking */
   white-space: nowrap;
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
 }
