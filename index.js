@@ -1207,6 +1207,10 @@ function initApp() {
     if (statusToast) statusToast.style.display = "block"; // Show alert toast
     if (headerStatus) headerStatus.textContent = "Scanning for targets...";
 
+    // Make body and html backgrounds transparent so camera feed is visible behind canvas
+    document.documentElement.style.backgroundColor = "transparent";
+    document.body.style.backgroundColor = "transparent";
+
     // Cache autostart state so reload bypasses clicking start again
     sessionStorage.setItem("ar_3d_autostart", "true");
 
