@@ -114,6 +114,22 @@ AFRAME.registerComponent('dino-behavior', {
     
     // Default home position coords in local space
     this.homePos = new THREE.Vector3(0, 0, 0);
+
+    // Store the dinosaur's original local position defined in HTML to preserve offsets
+    this.dinoBasePos = new THREE.Vector3(0, -1.2, 0.01); // Default fallback
+    if (this.dinoModel) {
+      const posAttr = this.dinoModel.getAttribute('position');
+      if (posAttr) {
+        if (typeof posAttr === 'object') {
+          this.dinoBasePos.set(posAttr.x || 0, posAttr.y || 0, posAttr.z || 0);
+        } else if (typeof posAttr === 'string') {
+          const parts = posAttr.trim().split(/\s+/).map(Number);
+          if (parts.length >= 3) {
+            this.dinoBasePos.set(parts[0], parts[1], parts[2]);
+          }
+        }
+      }
+    }
     
     // Default animation clips (will be overwritten dynamically below by scanning files)
     this.clipIdle = 'Idle';
@@ -127,7 +143,6 @@ AFRAME.registerComponent('dino-behavior', {
     // DINO CARD: Target Found Listener
     this.el.addEventListener('targetFound', () => {
       this.dinoCardTracked = true;
-      this.dinoVisible = true;
       this.updateHUD();
       if (window.dinoAudio) {
         window.dinoAudio.playRoar(); // Trigger growl roar on detection
@@ -137,11 +152,6 @@ AFRAME.registerComponent('dino-behavior', {
     // DINO CARD: Target Lost Listener
     this.el.addEventListener('targetLost', () => {
       this.dinoCardTracked = false;
-      // If we are currently idle, we hide the dinosaur immediately
-      if (this.state === "IDLE") {
-        this.dinoVisible = false;
-        this.resetDino();
-      }
       this.updateHUD();
     });
 
@@ -150,6 +160,16 @@ AFRAME.registerComponent('dino-behavior', {
       this.meatTarget.addEventListener('targetFound', () => {
         this.meatVisible = true;
         this.meatConsumed = false; // Reset consumed state when target card is scanned again
+        
+        // Reset scale and opacity of the meat model when target card is scanned
+        const meatModel = document.querySelector("#meat-model-entity");
+        if (meatModel) {
+          meatModel.setAttribute("eat-animation", {active: false});
+          if (meatModel.components["eat-animation"]) {
+            meatModel.components["eat-animation"].reset();
+          }
+        }
+        
         this.updateHUD();
       });
       this.meatTarget.addEventListener('targetLost', () => {
@@ -179,7 +199,7 @@ AFRAME.registerComponent('dino-behavior', {
       this.dinoModel.addEventListener('model-loaded', (e) => {
         const animations = e.detail.model.animations;
         if (animations && animations.length > 0) {
-          const animNames = animations.map(a => a.name.toLowerCase());
+          const animNames = animations.map(a => (a.name || "").toLowerCase());
           
           // Match animation names using string search keywords
           const walkIndex = animNames.findIndex(name => name.includes('walk') || name.includes('run'));
@@ -240,6 +260,14 @@ AFRAME.registerComponent('dino-behavior', {
         statusText = "Dino going back home... 🦖";
         toastText = "Dinosaur is returning to its starting spot.";
         statusColor = "#b45309"; // Amber yellow
+      } else if (this.state === "IDLE_AT_MEAT") {
+        statusText = "Dino is full! 🦖";
+        toastText = "Scan Dinosaur card to guide it back home.";
+        statusColor = "#b45309";
+      } else if (this.state === "IDLE_AT_TREE") {
+        statusText = "Dino inspected tree! 🌲";
+        toastText = "Scan Dinosaur card to guide it back home.";
+        statusColor = "#10b981";
       }
     } else {
       // Dino card is not currently tracked
@@ -279,7 +307,7 @@ AFRAME.registerComponent('dino-behavior', {
     - Handle grace tracking periods and visibilities.
   */
   tick: function (time, timeDelta) {
-    if (!this.dinoVisible || !this.dinoWrapper || !this.dinoModel) return;
+    if (!this.dinoWrapper || !this.dinoModel) return;
 
     // A-Frame Visibility Hack:
     // If the dinosaur is walking home or visiting targets and the user camera loses view 
@@ -287,8 +315,10 @@ AFRAME.registerComponent('dino-behavior', {
     // To solve this, we override A-Frame visibility: if the dino is active in any travel state,
     // we force visibility to remain true until it arrives safely back home.
     if (this.state !== "IDLE" || this.dinoCardTracked) {
+      this.dinoVisible = true;
       this.el.setAttribute("visible", true);
     } else {
+      this.dinoVisible = false;
       this.el.setAttribute("visible", false);
     }
 
@@ -360,6 +390,16 @@ AFRAME.registerComponent('dino-behavior', {
         this.state = "WALK_TO_TREE";
         this.updateHUD();
       }
+    } else if (this.state === "IDLE_AT_MEAT") {
+      if (this.dinoCardTracked) {
+        this.state = "WALK_HOME";
+        this.updateHUD();
+      }
+    } else if (this.state === "IDLE_AT_TREE") {
+      if (this.dinoCardTracked) {
+        this.state = "WALK_HOME";
+        this.updateHUD();
+      }
     }
 
     // ==========================================
@@ -380,15 +420,9 @@ AFRAME.registerComponent('dino-behavior', {
       // Reset positions to origin
       wrapper.position.set(0, 0, 0);
       wrapper.rotation.set(0, 0, 0);
-      model.position.set(0, 0, 0);
+      model.position.copy(this.dinoBasePos);
       model.rotation.set(0, 0, 0);
 
-      // Hide dinosaur completely if cards are lost and we are sitting idle
-      if (!this.dinoCardTracked) {
-        this.dinoVisible = false;
-        this.el.setAttribute("visible", false);
-        this.updateHUD();
-      }
     } 
     
     else if (this.state === "WALK_TO_MEAT") {
@@ -407,15 +441,27 @@ AFRAME.registerComponent('dino-behavior', {
         }
       }
 
+      // Force update world matrices to get precise real-time positions
+      wrapper.updateMatrixWorld(true);
+      if (this.meatTarget) {
+        this.meatTarget.object3D.updateMatrixWorld(true);
+      }
+
       // Bridging World Coordinates to Local Coordinates:
       // MindAR places targets at separate points in global space. To make the dinosaur walk
       // from its origin card, we read the meat's global coordinates and convert them into 
       // coordinates relative to the dinosaur using `worldToLocal()`.
-      const currentWorldPos = new THREE.Vector3();
-      wrapper.getWorldPosition(currentWorldPos);
-      const distance = currentWorldPos.distanceTo(meatWorldPos);
       const localTargetPos = this.el.object3D.worldToLocal(meatWorldPos.clone());
       localTargetPos.y = 0; // Flat movement plane (ignore height)
+
+      // Calculate distance in local 2D space to ignore tracking height discrepancies
+      const distance = wrapper.position.distanceTo(localTargetPos);
+
+      // Throttled logging for real-time debugging (every 500ms)
+      if (!this._lastMeatLogTime || time - this._lastMeatLogTime > 500) {
+        console.log(`[DinoAI] Dist to meat: ${distance.toFixed(3)}m, Target: (${localTargetPos.x.toFixed(2)}, ${localTargetPos.z.toFixed(2)})`);
+        this._lastMeatLogTime = time;
+      }
 
       // Guard check against NaN calculations
       if (isNaN(distance) || isNaN(localTargetPos.x) || isNaN(localTargetPos.z)) {
@@ -473,7 +519,8 @@ AFRAME.registerComponent('dino-behavior', {
         }
 
         // Apply a gentle side-to-side wobble animation via code to simulate physical weight
-        model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
+        model.position.copy(this.dinoBasePos);
+        model.position.y += Math.abs(Math.sin(time * 0.006)) * 0.005;
         model.rotation.z = Math.sin(time * 0.006) * 0.05;
       } else {
         // Dino arrived at meat: transition to EAT state
@@ -492,21 +539,17 @@ AFRAME.registerComponent('dino-behavior', {
         });
         if (window.dinoAudio) window.dinoAudio.startChewing(); // Play crunch loop
 
-        // Visual animation: scale down the meat 3D model, simulating it being eaten
+        // Visual animation: trigger scale & opacity animation on the meat entity
         const meatModel = document.querySelector("#meat-model-entity");
-        const meatFallback = document.querySelector("#meat-fallback");
         if (meatModel) {
-          meatModel.setAttribute("animation", "property: scale; to: 0 0 0; dur: 2000; easing: easeOutQuad");
-        }
-        if (meatFallback) {
-          meatFallback.setAttribute("animation", "property: scale; to: 0 0 0; dur: 2000; easing: easeOutQuad");
+          meatModel.setAttribute("eat-animation", {active: true, duration: 2000});
         }
 
         // Freeze face rotation target heading (prevents camera jitter shaking)
         const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
         wrapper.rotation.y = angle;
 
-        model.position.y = 0;
+        model.position.copy(this.dinoBasePos);
         model.rotation.z = 0;
       }
     } 
@@ -523,17 +566,19 @@ AFRAME.registerComponent('dino-behavior', {
         if (window.dinoAudio) window.dinoAudio.stopChewing();
 
         // Mark consumed so it doesn't double-trigger walk immediately
-        this.meatVisible = false;
-        this.lastMeatSeenTime = -999999;
         window.isMeatSimulated = false;
         this.meatConsumed = true; // Set flag
         this.updateHUD();
 
-        this.state = "WALK_HOME";
+        if (this.dinoCardTracked) {
+          this.state = "WALK_HOME";
+        } else {
+          this.state = "IDLE_AT_MEAT";
+        }
         this.updateHUD();
       } else {
         // Keep still and shine bright pink light on eating dino
-        model.position.y = 0;
+        model.position.copy(this.dinoBasePos);
         model.rotation.z = 0;
         targetLightColor.lerp(new THREE.Color("#f43f5e"), 1.0);
         targetIntensity = 1.6;
@@ -543,13 +588,27 @@ AFRAME.registerComponent('dino-behavior', {
     else if (this.state === "WALK_TO_TREE") {
       // Find where the Tree card is in physical space
       const treeWorldPos = new THREE.Vector3();
-      this.treeTarget.object3D.getWorldPosition(treeWorldPos);
+      if (this.treeTarget) {
+        this.treeTarget.object3D.getWorldPosition(treeWorldPos);
+      } else {
+        return;
+      }
 
-      const currentWorldPos = new THREE.Vector3();
-      wrapper.getWorldPosition(currentWorldPos);
-      const distance = currentWorldPos.distanceTo(treeWorldPos);
+      // Force update world matrices to get precise real-time positions
+      wrapper.updateMatrixWorld(true);
+      this.treeTarget.object3D.updateMatrixWorld(true);
+
       const localTargetPos = this.el.object3D.worldToLocal(treeWorldPos.clone());
       localTargetPos.y = 0;
+
+      // Calculate distance in local 2D space to ignore tracking height discrepancies
+      const distance = wrapper.position.distanceTo(localTargetPos);
+
+      // Throttled logging for real-time debugging (every 500ms)
+      if (!this._lastTreeLogTime || time - this._lastTreeLogTime > 500) {
+        console.log(`[DinoAI] Dist to tree: ${distance.toFixed(3)}m, Target: (${localTargetPos.x.toFixed(2)}, ${localTargetPos.z.toFixed(2)})`);
+        this._lastTreeLogTime = time;
+      }
 
       if (isNaN(distance) || isNaN(localTargetPos.x) || isNaN(localTargetPos.z)) {
         return;
@@ -596,7 +655,8 @@ AFRAME.registerComponent('dino-behavior', {
         }
 
         // Wobble walking motion
-        model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
+        model.position.copy(this.dinoBasePos);
+        model.position.y += Math.abs(Math.sin(time * 0.006)) * 0.005;
         model.rotation.z = Math.sin(time * 0.006) * 0.05;
       } else {
         // Arrived at tree: head home immediately (dino doesn't do anything at the tree)
@@ -607,15 +667,17 @@ AFRAME.registerComponent('dino-behavior', {
         const angle = Math.atan2(localTargetPos.x - wrapper.position.x, localTargetPos.z - wrapper.position.z);
         wrapper.rotation.y = angle;
 
-        this.treeVisible = false;
-        this.lastTreeSeenTime = -999999;
         this.treeInspected = true; // Mark as inspected
         this.updateHUD();
 
-        model.position.y = 0;
+        model.position.copy(this.dinoBasePos);
         model.rotation.z = 0;
 
-        this.state = "WALK_HOME";
+        if (this.dinoCardTracked) {
+          this.state = "WALK_HOME";
+        } else {
+          this.state = "IDLE_AT_TREE";
+        }
         this.updateHUD();
       }
     } 
@@ -624,17 +686,6 @@ AFRAME.registerComponent('dino-behavior', {
       const distToHome = wrapper.position.distanceTo(this.homePos);
 
       if (distToHome > 0.01) {
-        // Reset meat models back to scale (1 1 1) so it shows up for next scan
-        const meatModel = document.querySelector("#meat-model-entity");
-        const meatFallback = document.querySelector("#meat-fallback");
-        if (meatModel) {
-          meatModel.removeAttribute("animation");
-          meatModel.setAttribute("scale", "1 1 1");
-        }
-        if (meatFallback) {
-          meatFallback.removeAttribute("animation");
-          meatFallback.setAttribute("scale", "1 1 1");
-        }
 
         // Smoothly rotate heading towards home coordinate (0, 0, 0)
         const angle = Math.atan2(0 - wrapper.position.x, 0 - wrapper.position.z);
@@ -658,13 +709,49 @@ AFRAME.registerComponent('dino-behavior', {
           if (window.dinoAudio) window.dinoAudio.startWalking();
         }
 
-        model.position.y = Math.abs(Math.sin(time * 0.006)) * 0.005;
+        model.position.copy(this.dinoBasePos);
+        model.position.y += Math.abs(Math.sin(time * 0.006)) * 0.005;
         model.rotation.z = Math.sin(time * 0.006) * 0.05;
       } else {
-        // Arrived home: go to IDLE state
-        this.state = "IDLE";
-        this.updateHUD();
+        // Arrived home: reset dino to IDLE and stop animations/audio
+        this.resetDino();
       }
+    }
+    else if (this.state === "IDLE_AT_MEAT") {
+      this.isWalking = false;
+      this.isEating = false;
+      if (window.dinoAudio) {
+        window.dinoAudio.stopWalking();
+        window.dinoAudio.stopChewing();
+      }
+      
+      const mixer = this.dinoModel.getAttribute('animation-mixer');
+      if (!mixer || mixer.clip !== this.clipIdle) {
+        this.dinoModel.setAttribute('animation-mixer', {
+          clip: this.clipIdle,
+          loop: 'repeat',
+          crossFadeDuration: 0.3
+        });
+      }
+      model.position.copy(this.dinoBasePos);
+      model.rotation.z = 0;
+    }
+    else if (this.state === "IDLE_AT_TREE") {
+      this.isWalking = false;
+      if (window.dinoAudio) {
+        window.dinoAudio.stopWalking();
+      }
+      
+      const mixer = this.dinoModel.getAttribute('animation-mixer');
+      if (!mixer || mixer.clip !== this.clipIdle) {
+        this.dinoModel.setAttribute('animation-mixer', {
+          clip: this.clipIdle,
+          loop: 'repeat',
+          crossFadeDuration: 0.3
+        });
+      }
+      model.position.copy(this.dinoBasePos);
+      model.rotation.z = 0;
     }
 
     // Apply Lerped Lighting changes smoothly to ambientLight entity
@@ -709,7 +796,7 @@ AFRAME.registerComponent('dino-behavior', {
     // Reset spatial matrices
     wrapper.position.set(0, 0, 0);
     wrapper.rotation.set(0, 0, 0);
-    model.position.set(0, 0, 0);
+    model.position.copy(this.dinoBasePos);
     model.rotation.set(0, 0, 0);
 
     if (this.treeGltf) {
@@ -723,16 +810,13 @@ AFRAME.registerComponent('dino-behavior', {
       crossDuration: 0.3
     });
 
-    // Reset scales of food items
+    // Reset scales and opacities of food items
     const meatModel = document.querySelector("#meat-model-entity");
-    const meatFallback = document.querySelector("#meat-fallback");
     if (meatModel) {
-      meatModel.removeAttribute("animation");
-      meatModel.setAttribute("scale", "1 1 1");
-    }
-    if (meatFallback) {
-      meatFallback.removeAttribute("animation");
-      meatFallback.setAttribute("scale", "1 1 1");
+      meatModel.setAttribute("eat-animation", {active: false});
+      if (meatModel.components["eat-animation"]) {
+        meatModel.components["eat-animation"].reset();
+      }
     }
   }
 });
@@ -757,7 +841,7 @@ AFRAME.registerComponent('tree-color-patch', {
       // Traverse all nodes in the glTF hierarchy
       model.traverse((node) => {
         if (node.isMesh) {
-          const name = node.name.toLowerCase();
+          const name = (node.name || "").toLowerCase();
           if (node.material) {
             node.material = node.material.clone(); // Clone material to avoid sharing with other objects
             
@@ -765,7 +849,7 @@ AFRAME.registerComponent('tree-color-patch', {
               node.material.color.set('#22c55e'); // Green leaves
               node.material.roughness = 0.6;
               node.material.metalness = 0.1;
-            } else if (name.includes('bark') || name.includes('trunk') || name.includes('stem') || name.includes('root') || name.includes('wood')) {
+            } else if (name.includes('bark') || name.includes('trunk') || name.includes('stem') || name.includes('root') || name.includes('wood') || name.includes('branch') || name.includes('twig') || name.includes('grove')) {
               node.material.color.set('#78350f'); // Brown trunk
               node.material.roughness = 0.9;
               node.material.metalness = 0.05;
@@ -773,6 +857,76 @@ AFRAME.registerComponent('tree-color-patch', {
           }
         }
       });
+    });
+  }
+});
+
+
+// =========================================================================
+// 3.5. REGISTER EAT ANIMATION COMPONENT FOR SCALE & OPACITY FADE
+// =========================================================================
+AFRAME.registerComponent('eat-animation', {
+  schema: {
+    active: {type: 'boolean', default: false},
+    duration: {type: 'number', default: 2000}
+  },
+  init: function () {
+    this.elapsed = 0;
+  },
+  update: function (oldData) {
+    if (this.data.active && !oldData.active) {
+      this.elapsed = 0;
+    } else if (!this.data.active && oldData.active) {
+      this.reset();
+    }
+  },
+  tick: function (time, timeDelta) {
+    if (!this.data.active) return;
+    this.elapsed += timeDelta;
+    const progress = Math.min(this.elapsed / this.data.duration, 1);
+    
+    // Easing: easeOutQuad
+    const ease = 1 - (1 - progress) * (1 - progress);
+    const scaleVal = 1 - ease;
+    
+    this.el.object3D.scale.set(scaleVal, scaleVal, scaleVal);
+    
+    this.el.object3D.traverse((node) => {
+      if (node.isMesh && node.material) {
+        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        materials.forEach((mat) => {
+          if (mat._originalTransparent === undefined) {
+            mat._originalTransparent = mat.transparent;
+          }
+          if (mat._originalOpacity === undefined) {
+            mat._originalOpacity = mat.opacity;
+          }
+          mat.transparent = true;
+          mat.opacity = mat._originalOpacity * (1 - ease);
+          mat.needsUpdate = true;
+        });
+      }
+    });
+    
+    if (progress >= 1) {
+      this.data.active = false;
+    }
+  },
+  reset: function () {
+    this.el.object3D.scale.set(1, 1, 1);
+    this.el.object3D.traverse((node) => {
+      if (node.isMesh && node.material) {
+        const materials = Array.isArray(node.material) ? node.material : [node.material];
+        materials.forEach((mat) => {
+          if (mat._originalTransparent !== undefined) {
+            mat.transparent = mat._originalTransparent;
+          }
+          if (mat._originalOpacity !== undefined) {
+            mat.opacity = mat._originalOpacity;
+          }
+          mat.needsUpdate = true;
+        });
+      }
     });
   }
 });

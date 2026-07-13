@@ -23,6 +23,18 @@
     window.addEventListener('unhandledrejection', function(event) {
       alert('Unhandled Promise Rejection Detected:\n\n' + event.reason);
     });
+
+    // Mobile console debugger (Eruda) activation
+    const urlParams = new URLSearchParams(window.location.search);
+    if (urlParams.get('debug') === 'true') {
+      const script = document.createElement('script');
+      script.src = 'https://cdn.jsdelivr.net/npm/eruda';
+      document.head.appendChild(script);
+      script.onload = function () {
+        eruda.init();
+        console.log("[ARApp] Eruda mobile console debugger loaded successfully.");
+      };
+    }
   </script>
 
   <!-- 
@@ -120,7 +132,7 @@
       <a-asset-item id="dinoModel" src="assets/dino.glb"></a-asset-item>
       
       <!-- tree_animate.glb: Tree mesh supporting morph-target growth animations -->
-      <a-asset-item id="treeModel" src="assets/tree_animate.glb"></a-asset-item>
+      <a-asset-item id="treeModel" src="assets/tree_gt_003_draco_5mb.glb"></a-asset-item> <!--"assets/tree_animate.glb"></a-asset-item>-->
       
       <!-- meat.glb: Food meat mesh -->
       <a-asset-item id="meatModel" src="assets/meat.glb"></a-asset-item>
@@ -166,8 +178,8 @@
         <a-gltf-model 
           id="dino-model" 
           rotation="0 0 0" 
-          position="0 0 0.05" 
-          scale="0.25 0.25 0.25" 
+          position="0 -1.25 0.01" 
+          scale="0.25 0.25 0.25"
           src="#dinoModel"
           shadow="cast: true; receive: true">
         </a-gltf-model>
@@ -188,7 +200,7 @@
           We attach 'tree-color-patch' here to overwrite node material maps with natural colors on load.
           animation-mixer triggers the growth loop animation clip (MorphBake).
         -->
-        <a-gltf-model src="#treeModel" scale="0.005 0.005 0.005" rotation="90 0 0" position="0.41 0 0.05" animation-mixer="clip: MorphBake; loop: repeat" tree-color-patch shadow="cast: true; receive: true"></a-gltf-model>
+        <a-gltf-model src="#treeModel" scale="0.1 0.1 0.1" rotation="0 0 0" position="1.035 0.30 -0.119" tree-color-patch shadow="cast: true; receive: true"></a-gltf-model>
         <a-plane rotation="-90 0 0" width="1" height="1" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
         <!-- 
           Geometrical Fallback Model:
@@ -209,7 +221,7 @@
       mindar-image-target maps this container to card index 0.
     -->
     <a-entity id="meat-target" mindar-image-target="targetIndex: 0">
-      <a-entity id="meat-model-entity" position="0 0 0">
+      <a-entity id="meat-model-entity" position="0 0 0" eat-animation>
         <a-gltf-model src="#meatModel" scale="0.02 0.02 0.02" rotation="90 0 0" position="0 0 0.05" shadow="cast: true; receive: true"></a-gltf-model>
         <a-plane rotation="-90 0 0" width="1" height="1" shadow="receive: true" material="shader: shadow; opacity: 0.45; depthWrite: false" position="0 0 0"></a-plane>
         <!-- Geometrical Fallback Model: sphere + cylinder represent meat food if asset loading fails -->
